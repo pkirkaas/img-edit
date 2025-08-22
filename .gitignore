@@ -1,0 +1,30 @@
+.py[cod]
+
+# Defaults - swap, logs, tmp, cache
+*.swp
+*.swo
+*.bak
+.env
+logs/
+log/
+*.log
+tmp/
+*.tmp
+cache/
+.venv/
+
+
+
+# Python/PDM artifact files
+.pdm.toml
+__pypackages__/
+__pycache__/
+.cache/
+.pdm-python
+
+
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.pdm-python
