@@ -7,3 +7,9 @@
 - Uses the Hugging Face Serverless Inference API as the LLM Provider
 - Uses the git+https://github.com/huggingface/diffusers python package
 - The Hugging Face API key is specified in the `.env` file
+
+## Initial Required functionality
+
+A CLI/Terminal application that accepts 2 parameters/arguments - the path to an image file, and the text instructions for the requested edit of the image.
+In `pyproject.toml`, create a script entry to be executed from the terminal/CLI by: `pdm run imgedit`
+
