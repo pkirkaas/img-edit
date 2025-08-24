@@ -55,7 +55,7 @@ class FakeImageIO:
 
 class FakeHFClient:
     """
-    HFClient stub capturing invocation details and optionally raising errors.
+    HFImageEditClient stub capturing invocation details and optionally raising errors.
 
     Class attributes:
       - raise_mode: None | "api" | "network"
@@ -65,18 +65,29 @@ class FakeHFClient:
     EXC_API: type[BaseException] = Exception
     EXC_NET: type[BaseException] = Exception
 
-    def __init__(self, settings: Any, max_retries: int = 0, retry_delay: float = 0.0):
-        self.settings = settings
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
+    def __init__(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        endpoint: str | None = None,
+        token: str | None = None,
+        timeout: int | None = None,
+        **_: Any,
+    ):
+        # Store basic config for potential assertions
+        self.provider = provider
+        self.model = model
+        self.endpoint = endpoint
+        self.token = token
+        self.timeout = timeout
         self.last_call: Dict[str, Any] | None = None
 
-    def inference_request(
+    def edit_image(
         self,
-        image_bytes: bytes,
+        input_image: bytes,
         prompt: str,
-        guidance_scale: float | None = None,
         strength: float | None = None,
+        guidance: float | None = None,
         seed: int | None = None,
         **kwargs: Any,
     ) -> Image.Image:
@@ -86,9 +97,9 @@ class FakeHFClient:
             raise FakeHFClient.EXC_NET("network error")
         # Record invocation for assertions
         self.last_call = {
-            "image_bytes_len": len(image_bytes),
+            "image_bytes_len": len(input_image),
             "prompt": prompt,
-            "guidance_scale": guidance_scale,
+            "guidance": guidance,
             "strength": strength,
             "seed": seed,
             "kwargs": kwargs,
@@ -116,7 +127,10 @@ def pipeline_with_stubs(monkeypatch: pytest.MonkeyPatch) -> Generator[Any, None,
     stub_mod = types.ModuleType("lib.image_io")
     # Names used by edit_pipeline: ImageIO (class) and ImageValidationError (type)
     setattr(stub_mod, "ImageIO", FakeImageIO)
-    setattr(stub_mod, "ImageValidationError", RuntimeError)  # not used, pipeline defines its own class anyway
+    # Provide a named exception so pipeline error_type matches "ImageValidationError"
+    class ImageValidationError(Exception):
+        pass
+    setattr(stub_mod, "ImageValidationError", ImageValidationError)
 
     # Inject the stub before importing the pipeline
     monkeypatch.setitem(sys.modules, "lib.image_io", stub_mod, raising=False)
@@ -131,8 +145,8 @@ def pipeline_with_stubs(monkeypatch: pytest.MonkeyPatch) -> Generator[Any, None,
     FakeHFClient.EXC_API = hf_mod.HFAPIError
     FakeHFClient.EXC_NET = hf_mod.HFNetworkError
     
-    # Patch the pipeline's HFClient reference to our stub
-    monkeypatch.setattr(pipeline_mod, "HFClient", FakeHFClient, raising=True)
+    # Patch the pipeline's HFImageEditClient reference to our stub
+    monkeypatch.setattr(pipeline_mod, "HFImageEditClient", FakeHFClient, raising=True)
 
     try:
         yield pipeline_mod

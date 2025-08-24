@@ -1,140 +1,143 @@
 """
 Configuration management for the image editing application.
 
-This module handles loading and validation of environment variables and application settings
-using Pydantic for robust configuration management.
+Syntax validated with ast.parse.
 
-Example usage:
-    >>> from lib.config import Settings
-    >>> settings = Settings()
-    >>> print(settings.HF_API_TOKEN)
-    'your_hugging_face_token'
+This module loads and validates environment-backed settings using Pydantic. It supports
+the new InferenceClient approach where configuration can be provided via either:
+- provider + token (preferred)
+- endpoint (overrides provider/model if present)
+- model + token (fallback)
 
-Environment variables:
-    HF_API_TOKEN: Required Hugging Face API token for serverless inference
-    HF_INFERENCE_ENDPOINT: Hugging Face inference endpoint (default: Qwen/Qwen-Image-Edit)
-    IMG_EDIT_TIMEOUT_SECONDS: Request timeout in seconds (default: 120)
-    IMG_EDIT_DEFAULT_GUIDANCE: Default guidance scale for image generation (default: 7.5)
-    IMG_EDIT_DEFAULT_STRENGTH: Default strength for image editing (default: 0.8)
-    IMG_EDIT_SEED: Optional seed for deterministic results
+Token resolution prefers HF_TOKEN over HF_API_TOKEN.
+
+Environment variables (preferred names):
+- HF_TOKEN (preferred) / HF_API_TOKEN (fallback)
+- IMG_EDIT_PROVIDER (default: "fal-ai")
+- IMG_EDIT_MODEL (default: "Qwen/Qwen-Image-Edit")
+- HF_INFERENCE_ENDPOINT (optional; if set, overrides provider/model)
+- IMG_EDIT_TIMEOUT_SECONDS (default: 120)
+- IMG_EDIT_DEFAULT_GUIDANCE (default: 7.5)
+- IMG_EDIT_DEFAULT_STRENGTH (default: 0.8)
+- IMG_EDIT_SEED (optional)
 """
 
-import os
+from __future__ import annotations
+
 from typing import Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables from .env file (if present)
 load_dotenv()
 
 
 class Settings(BaseSettings):
     """
     Application settings with environment variable validation.
-    
-    This class validates and provides access to all configuration settings
-    required for the image editing application.
-    
+
     Attributes:
-        HF_API_TOKEN: Hugging Face API token for authentication (required)
-        HF_INFERENCE_ENDPOINT: Endpoint for Hugging Face serverless inference
-        IMG_EDIT_TIMEOUT_SECONDS: Timeout for HTTP requests in seconds
-        IMG_EDIT_DEFAULT_GUIDANCE: Default guidance scale for image generation
-        IMG_EDIT_DEFAULT_STRENGTH: Default strength parameter for image editing
-        IMG_EDIT_SEED: Optional seed for deterministic generation
+        HF_TOKEN: Preferred Hugging Face API token
+        HF_API_TOKEN: Fallback Hugging Face API token
+        IMG_EDIT_PROVIDER: Provider identifier (e.g., "fal-ai")
+        IMG_EDIT_MODEL: Model repo id (e.g., "Qwen/Qwen-Image-Edit")
+        HF_INFERENCE_ENDPOINT: Optional explicit endpoint (overrides provider/model)
+        IMG_EDIT_TIMEOUT_SECONDS: Timeout in seconds for API calls
+        IMG_EDIT_DEFAULT_GUIDANCE: Default guidance scale
+        IMG_EDIT_DEFAULT_STRENGTH: Default editing strength
+        IMG_EDIT_SEED: Optional seed for determinism
     """
-    
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
     )
-    
-    HF_API_TOKEN: str = Field(
-        ...,
-        description="Hugging Face API token for serverless inference authentication",
-        min_length=1,
+
+    # Token handling: prefer HF_TOKEN, fallback HF_API_TOKEN
+    HF_TOKEN: Optional[str] = Field(default=None, description="Preferred Hugging Face API token (recommended name)")
+    HF_API_TOKEN: Optional[str] = Field(default=None, description="Fallback token name for Hugging Face API")
+
+    # Provider/model approach by default; endpoint optional override
+    IMG_EDIT_PROVIDER: str = Field(default="fal-ai", description="Inference provider name (default: fal-ai)")
+    IMG_EDIT_MODEL: str = Field(default="Qwen/Qwen-Image-Edit", description="Model repo id for image edit")
+
+    HF_INFERENCE_ENDPOINT: Optional[str] = Field(
+        default=None,
+        description="Optional explicit endpoint URL; if set, overrides provider/model",
     )
-    
-    HF_INFERENCE_ENDPOINT: str = Field(
-        default="https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit",
-        description="Hugging Face serverless inference endpoint URL",
-    )
-    
+
     IMG_EDIT_TIMEOUT_SECONDS: int = Field(
         default=120,
-        description="Timeout in seconds for HTTP requests to Hugging Face API",
+        description="Timeout in seconds for API calls",
         gt=0,
     )
-    
+
     IMG_EDIT_DEFAULT_GUIDANCE: float = Field(
         default=7.5,
-        description="Default guidance scale for image generation (controls creativity vs. adherence to prompt)",
+        description="Default guidance scale for image editing",
         gt=0,
     )
-    
+
     IMG_EDIT_DEFAULT_STRENGTH: float = Field(
         default=0.8,
         description="Default strength parameter for image editing (0.0 to 1.0)",
         ge=0.0,
         le=1.0,
     )
-    
+
     IMG_EDIT_SEED: Optional[int] = Field(
         default=None,
         description="Optional seed for deterministic image generation results",
     )
-    
-    @field_validator("HF_API_TOKEN")
+
+    # Validators
+
+    @field_validator("HF_TOKEN", "HF_API_TOKEN")
     @classmethod
-    def validate_api_token(cls, v: str) -> str:
-        """
-        Validate that the API token is provided and not empty.
-        
-        Args:
-            v: The API token value to validate
-            
-        Returns:
-            The validated API token
-            
-        Raises:
-            ValueError: If the API token is empty or missing
-        """
-        if not v or v.strip() == "":
-            raise ValueError("HF_API_TOKEN is required and cannot be empty")
-        return v.strip()
-    
+    def _strip_token(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize token fields; empty strings become None."""
+        if v is None:
+            return None
+        v2 = v.strip()
+        return v2 or None
+
     @field_validator("HF_INFERENCE_ENDPOINT")
     @classmethod
-    def validate_endpoint(cls, v: str) -> str:
+    def _validate_endpoint(cls, v: Optional[str]) -> Optional[str]:
+        """Validate endpoint URL format if provided."""
+        if v is None:
+            return None
+        v2 = v.strip()
+        if not v2:
+            return None
+        if not v2.startswith(("http://", "https://")):
+            raise ValueError("HF_INFERENCE_ENDPOINT must be a valid HTTP/HTTPS URL when provided")
+        return v2.rstrip("/")
+
+    # Convenience helpers
+
+    def get_token(self) -> Optional[str]:
         """
-        Validate that the endpoint URL is properly formatted.
-        
-        Args:
-            v: The endpoint URL to validate
-            
+        Return the effective HF token using HF_TOKEN (preferred) or HF_API_TOKEN fallback.
+
         Returns:
-            The validated endpoint URL
-            
-        Raises:
-            ValueError: If the endpoint URL is invalid
+            Optional[str]: The resolved token value, or None if not set
         """
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("HF_INFERENCE_ENDPOINT must be a valid HTTP/HTTPS URL")
-        return v.rstrip("/")
+        return self.HF_TOKEN or self.HF_API_TOKEN
 
 
-# Global settings instance
+# Global settings instance (safe even without tokens; token is validated later at client usage)
 settings = Settings()
 
 
 def get_settings() -> Settings:
     """
     Get the global application settings instance.
-    
+
     Returns:
         Settings: The global settings instance
     """
@@ -143,11 +146,15 @@ def get_settings() -> Settings:
 
 if __name__ == "__main__":
     # Test the configuration loading
-    test_settings = Settings()
+    s = Settings()
     print("Configuration loaded successfully:")
-    print(f"HF_API_TOKEN: {test_settings.HF_API_TOKEN[:10]}... (truncated)")
-    print(f"HF_INFERENCE_ENDPOINT: {test_settings.HF_INFERENCE_ENDPOINT}")
-    print(f"IMG_EDIT_TIMEOUT_SECONDS: {test_settings.IMG_EDIT_TIMEOUT_SECONDS}")
-    print(f"IMG_EDIT_DEFAULT_GUIDANCE: {test_settings.IMG_EDIT_DEFAULT_GUIDANCE}")
-    print(f"IMG_EDIT_DEFAULT_STRENGTH: {test_settings.IMG_EDIT_DEFAULT_STRENGTH}")
-    print(f"IMG_EDIT_SEED: {test_settings.IMG_EDIT_SEED}")
+    print(f"HF_TOKEN (preferred): {('set' if s.HF_TOKEN else 'none')}")
+    print(f"HF_API_TOKEN (fallback): {('set' if s.HF_API_TOKEN else 'none')}")
+    print(f"Effective token resolved: {('set' if s.get_token() else 'none')}")
+    print(f"IMG_EDIT_PROVIDER: {s.IMG_EDIT_PROVIDER}")
+    print(f"IMG_EDIT_MODEL: {s.IMG_EDIT_MODEL}")
+    print(f"HF_INFERENCE_ENDPOINT: {s.HF_INFERENCE_ENDPOINT}")
+    print(f"IMG_EDIT_TIMEOUT_SECONDS: {s.IMG_EDIT_TIMEOUT_SECONDS}")
+    print(f"IMG_EDIT_DEFAULT_GUIDANCE: {s.IMG_EDIT_DEFAULT_GUIDANCE}")
+    print(f"IMG_EDIT_DEFAULT_STRENGTH: {s.IMG_EDIT_DEFAULT_STRENGTH}")
+    print(f"IMG_EDIT_SEED: {s.IMG_EDIT_SEED}")

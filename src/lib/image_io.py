@@ -25,8 +25,9 @@ Functions:
 """
 
 import os
+import io
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Tuple, Any
 
 from PIL import Image, ImageFile, UnidentifiedImageError
 
@@ -34,9 +35,111 @@ from PIL import Image, ImageFile, UnidentifiedImageError
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # Supported image formats for input and output
-SUPPORTED_FORMATS = {"JPEG", "JPG", "PNG", "BMP", "GIF", "TIFF", "WEBP"}
+SUPPORTED_FORMATS = {"JPEG", "PNG", "BMP", "GIF", "TIFF", "WEBP"}
+
+# Mapping from filename extension to Pillow format names
+EXT_TO_PILLOW_FORMAT = {
+    "jpg": "JPEG",
+    "jpeg": "JPEG",
+    "png": "PNG",
+    "webp": "WEBP",
+    "bmp": "BMP",
+    "gif": "GIF",
+    "tif": "TIFF",
+    "tiff": "TIFF",
+}
+
+# Public API of this module
+__all__ = [
+    "SUPPORTED_FORMATS",
+    "load_image",
+    "save_image",
+    "load_mask",
+    "validate_image_format",
+    "ImageIO",
+    "ImageValidationError",
+]
 
 
+class ImageValidationError(Exception):
+    """
+    Exception type for image validation or loading issues encountered by ImageIO.
+
+    Raised when an image cannot be found, read, identified, or is in an unsupported format
+    for the purposes of the editing pipeline.
+
+    Example:
+        >>> raise ImageValidationError("Unsupported image format: ICO")
+    """
+    pass
+
+
+class ImageIO:
+    """
+    Object-oriented facade over module-level image I/O helpers, tailored for the pipeline.
+
+    Methods:
+      - load_image(path): returns (bytes, info) where:
+            info = { "format": "PNG"|"JPEG", "dimensions": (width, height) }
+        Uses PNG when the image has an alpha channel, otherwise JPEG.
+      - save_image(image, path): persists the image and returns:
+            { "file_size": int, "format": str, "dimensions": (w, h) }
+
+    Notes:
+      - Internally delegates to the module-level functions for validation and saving.
+      - Converts images to bytes for transport to the HF client.
+    """
+
+    def load_image(self, path: Union[str, Path]) -> Tuple[bytes, Dict[str, Any]]:
+        """
+        Load and validate an image, returning encoded bytes and simple metadata.
+
+        Args:
+            path: Path to the image file (str or Path)
+
+        Returns:
+            Tuple[bytes, Dict[str, Any]]:
+                - bytes: Serialized image bytes (PNG if alpha, else JPEG)
+                - info:  {"format": "PNG"|"JPEG", "dimensions": (width, height)}
+
+        Raises:
+            ImageValidationError: On not found, unreadable, unidentifiable, or unsupported format
+        """
+        try:
+            # Reuse the robust module-level loader which validates existence/format
+            img = load_image(path)
+            # Preserve transparency using PNG; otherwise use JPEG for compactness
+            encode_format = "PNG" if img.mode == "RGBA" else "JPEG"
+            buf = io.BytesIO()
+            img.save(buf, format=encode_format)
+            return buf.getvalue(), {"format": encode_format, "dimensions": img.size}
+        except (FileNotFoundError, PermissionError, UnidentifiedImageError, ValueError) as e:
+            raise ImageValidationError(str(e)) from e
+        except Exception as e:
+            raise ImageValidationError(f"Unexpected image load error: {e}") from e
+
+    def save_image(self, edited_image: Image.Image, path: Union[str, Path]) -> Dict[str, Any]:
+        """
+        Save a PIL image to disk and return output metadata.
+
+        Args:
+            edited_image: PIL Image to save
+            path: Destination file path (str or Path)
+
+        Returns:
+            Dict[str, Any]:
+                {
+                    "file_size": output size in bytes,
+                    "format": stored image format (derived from file extension),
+                    "dimensions": (width, height)
+                }
+
+        Raises:
+            ValueError, PermissionError, RuntimeError: propagated from save operation
+        """
+        # Delegate persistence and return info from the module-level function
+        info = save_image(edited_image, path)
+        return info
 def load_image(path: Union[str, Path]) -> Image.Image:
     """
     Load an image from the specified file path with validation.
@@ -92,59 +195,68 @@ def load_image(path: Union[str, Path]) -> Image.Image:
         raise RuntimeError(f"Error loading image {path}: {e}")
 
 
-def save_image(image: Image.Image, path: Union[str, Path], **kwargs) -> None:
+def save_image(image: Image.Image, path: Union[str, Path], **kwargs) -> Dict[str, Any]:
     """
-    Save an image to the specified file path with format detection.
-    
-    This function saves an image to disk, automatically detecting the format
-    from the file extension and handling appropriate saving parameters.
-    
+    Save an image to the specified file path with format detection and normalization.
+
+    This function saves an image to disk, normalizing common filename extensions to the
+    Pillow format names, ensuring the output directory exists, and applying minimal,
+    sensible defaults per format. Unknown extensions default to PNG.
+
     Args:
         image: PIL Image object to save
         path: Destination file path (string or Path object)
-        **kwargs: Additional arguments passed to PIL Image.save()
-        
+        **kwargs: Additional arguments forwarded to PIL Image.save()
+
+    Returns:
+        Dict[str, Any]: {
+            "file_size": output size in bytes,
+            "format": stored image format (normalized Pillow format name),
+            "dimensions": (width, height)
+        }
+
     Raises:
-        ValueError: If the file format is not supported
-        PermissionError: If the file cannot be written due to permissions
-        RuntimeError: If the image cannot be saved
-        
-    Example:
-        >>> save_image(image, "output.png", quality=95)
-        >>> save_image(image, "result.jpg", optimize=True)
+        PermissionError: If the destination directory is not writable
+        RuntimeError: If the image cannot be saved for any reason (includes path, format, and original error)
     """
     path = Path(path) if isinstance(path, str) else path
-    
-    # Check if directory exists and is writable
+
+    # Ensure destination directory exists and is writable
     parent_dir = path.parent
     if parent_dir and not parent_dir.exists():
         parent_dir.mkdir(parents=True, exist_ok=True)
-    
     if parent_dir and not os.access(parent_dir, os.W_OK):
         raise PermissionError(f"Permission denied: cannot write to directory {parent_dir}")
-    
-    # Get file extension and validate format
+
+    # Determine format from extension, default to PNG when unknown
     ext = path.suffix.lower().lstrip(".")
-    if ext.upper() not in SUPPORTED_FORMATS:
-        raise ValueError(f"Unsupported image format: {ext}. Supported formats: {SUPPORTED_FORMATS}")
-    
+    fmt = EXT_TO_PILLOW_FORMAT.get(ext, "PNG")
+
+    # Apply minimal defaults per format
+    save_args: Dict[str, Any] = {}
+    if fmt == "JPEG":
+        save_args.setdefault("quality", 95)
+        save_args.setdefault("optimize", True)
+    elif fmt == "PNG":
+        save_args.setdefault("optimize", True)
+
+    # Merge any provided kwargs (caller wins)
+    save_args.update(kwargs)
+
+    # Ensure JPEG-compatible mode (JPEG does not support alpha or palette)
+    img_to_save = image
+    if fmt == "JPEG" and image.mode not in ("RGB",):
+        img_to_save = image.convert("RGB")
+
     try:
-        # Set appropriate save parameters based on format
-        save_args = {}
-        if ext in ("jpg", "jpeg"):
-            save_args.setdefault("quality", 95)
-            save_args.setdefault("optimize", True)
-        elif ext == "png":
-            save_args.setdefault("optimize", True)
-        
-        # Merge with any provided kwargs
-        save_args.update(kwargs)
-        
-        # Save the image
-        image.save(path, format=ext.upper(), **save_args)
-        
+        img_to_save.save(path, format=fmt, **save_args)
     except Exception as e:
-        raise RuntimeError(f"Error saving image to {path}: {e}")
+        raise RuntimeError(f"Error saving image to {path}: {fmt}: {e}")
+
+    # Gather output metadata
+    file_size = path.stat().st_size
+    dimensions = img_to_save.size
+    return {"file_size": file_size, "format": fmt, "dimensions": dimensions}
 
 
 def load_mask(path: Union[str, Path]) -> Optional[Image.Image]:

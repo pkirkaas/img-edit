@@ -79,3 +79,31 @@ def test_load_image_rejects_unsupported_format(tmp_path: Path) -> None:
     Image.new("RGB", (16, 16), color="purple").save(ico_path, format="ICO")
     with pytest.raises(RuntimeError):
         image_io.load_image(ico_path)
+
+
+def test_save_image_jpg_extension_maps_to_jpeg(tmp_path: Path) -> None:
+    # Arrange
+    out_path = tmp_path / "mapped.jpg"
+    img = Image.new("RGB", (12, 8), color="orange")
+    # Act
+    info = image_io.save_image(img, out_path)
+    # Assert
+    assert out_path.exists() and out_path.stat().st_size > 0
+    with Image.open(out_path) as reloaded:
+        assert reloaded.format == "JPEG"
+    assert info["format"] == "JPEG"
+    assert info["dimensions"] == (12, 8)
+
+
+def test_save_rgba_image_to_jpg_converts_and_succeeds(tmp_path: Path) -> None:
+    # Arrange
+    out_path = tmp_path / "alpha.jpg"
+    rgba = Image.new("RGBA", (9, 7), color=(10, 20, 30, 128))
+    # Act
+    info = image_io.save_image(rgba, out_path)
+    # Assert
+    assert out_path.exists() and out_path.stat().st_size > 0
+    with Image.open(out_path) as reloaded:
+        assert reloaded.format == "JPEG"
+        assert reloaded.mode == "RGB"
+    assert info["format"] == "JPEG"

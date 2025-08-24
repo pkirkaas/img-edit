@@ -23,13 +23,12 @@ Run all commands from the project root directory.
 
 ```bash
 pdm run img-edit --help
-pdm run img-edit edit --help
 ```
 
 ## Example 1 — Basic image edit with prompt
 
 ```bash
-pdm run img-edit edit \
+pdm run img-edit \
   --input ./examples/assets/input.jpg \
   --prompt "Replace the sky with a sunset" \
   --output ./out/edited.jpg
@@ -42,7 +41,7 @@ Notes:
 ## Example 2 — Edit with mask for precise control
 
 ```bash
-pdm run img-edit edit \
+pdm run img-edit \
   -i ./examples/assets/input.jpg \
   -p "Change the background to pure white, keep the subject unchanged" \
   -m ./examples/assets/mask.png \
@@ -56,7 +55,7 @@ Notes:
 ## Example 3 — Using parameters (strength, guidance, seed)
 
 ```bash
-pdm run img-edit edit \
+pdm run img-edit \
   -i ./examples/assets/input.jpg \
   -p "Transform the photo into a soft watercolor painting" \
   -o ./out/edited_params.jpg \
@@ -75,7 +74,7 @@ Parameter tips:
 You can override the HTTP timeout and the Hugging Face endpoint for a single run:
 
 ```bash
-pdm run img-edit edit \
+pdm run img-edit \
   -i ./examples/assets/input.jpg \
   -p "Add cinematic golden-hour lighting" \
   -o ./out/edited_custom.jpg \

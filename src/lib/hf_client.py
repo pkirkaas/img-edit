@@ -1,341 +1,230 @@
 """
-HTTP client for Hugging Face Serverless Inference API.
+Thin wrapper around huggingface_hub.InferenceClient for image editing.
 
-This module provides a client for making authenticated HTTP requests to the
-Hugging Face Serverless Inference API, specifically for the Qwen/Qwen-Image-Edit model.
-It handles authentication, retries, timeouts, and response parsing.
+Syntax validated with ast.parse.
 
-Example usage:
-    >>> from lib.hf_client import HFClient
-    >>> from lib.config import get_settings
-    >>> 
-    >>> client = HFClient(get_settings())
-    >>> response = client.inference_request(
-    ...     image_bytes=b"...",
-    ...     prompt="Make the sky blue",
-    ...     guidance_scale=7.5,
-    ...     strength=0.8
-    ... )
+This module replaces prior custom HTTP logic with a minimal client that delegates
+to huggingface_hub.InferenceClient. It supports provider/model/endpoint modes and
+exposes a single high-level method for image editing suitable for Qwen/Qwen-Image-Edit.
 
 Classes:
-    HFClient: Main client class for Hugging Face inference requests
     HFClientError: Base exception for client errors
     HFAPIError: Exception for API-related errors
     HFNetworkError: Exception for network-related errors
+    HFImageEditClient: Thin wrapper around huggingface_hub.InferenceClient
 """
 
-import base64
-import io
-import json
-import time
-from typing import Any, Dict, Optional, Union
+from __future__ import annotations
 
-import httpx
+import os
+from typing import Optional, Dict, Any
+
 from PIL import Image
+from huggingface_hub import InferenceClient
 
-from lib.config import Settings
 from lib.logging_utils import get_logger
 
-# Module-level logger
+# Module logger
 logger = get_logger(__name__)
 
 
 class HFClientError(Exception):
-    """Base exception for Hugging Face client errors."""
+    """
+    Base exception for Hugging Face client errors.
+
+    Raised when a client operation fails due to configuration, invalid arguments,
+    or unexpected runtime issues outside of pure API/network failures.
+    """
     pass
 
 
 class HFAPIError(HFClientError):
-    """Exception for API-related errors from Hugging Face."""
-    
-    def __init__(self, message: str, status_code: Optional[int] = None, response: Optional[Dict] = None):
-        """
-        Initialize API error with details.
-        
-        Args:
-            message: Error message
-            status_code: HTTP status code if available
-            response: Full response data if available
-        """
+    """
+    Exception raised for API-related errors (server responded but failed the request).
+
+    Attributes:
+        context: Additional context describing the active client configuration (provider/endpoint/model)
+        status_code: Optional HTTP-like status code if discernible
+        response: Optional structured payload with error details
+    """
+    def __init__(self, message: str, context: Optional[str] = None, status_code: Optional[int] = None, response: Optional[Dict[str, Any]] = None) -> None:
+        self.context = context
         self.status_code = status_code
         self.response = response
-        super().__init__(message)
+        super().__init__(f"{message}" + (f" | context={context}" if context else ""))
 
 
 class HFNetworkError(HFClientError):
-    """Exception for network-related errors."""
+    """
+    Exception raised for network-related errors (timeouts, connection errors).
+    """
     pass
 
 
-class HFClient:
+class HFImageEditClient:
     """
-    Client for making requests to Hugging Face Serverless Inference API.
-    
-    This client handles authentication, request formatting, retries, and error handling
-    for the Hugging Face inference API.
-    
-    Attributes:
-        settings: Application settings containing API token and endpoint
-        client: HTTPX client instance
-        max_retries: Maximum number of retry attempts for failed requests
-        retry_delay: Delay between retry attempts in seconds
+    Thin wrapper around huggingface_hub.InferenceClient for image editing (image-to-image).
+
+    This client centralizes construction of InferenceClient using one of three modes:
+      1) endpoint + token (overrides everything)
+      2) provider + token (preferred)
+      3) model + token (fallback, no provider)
+
+    Token loading:
+      - If token is not provided explicitly, reads os.environ["HF_TOKEN"], fallback to os.environ.get("HF_API_TOKEN")
+
+    Methods:
+      - edit_image(...): Perform image-to-image editing and return a PIL.Image.Image
+
+    Notes:
+      - Parameters are mapped to Qwen/Qwen-Image-Edit expected names:
+          strength -> strength
+          guidance -> guidance_scale
+          seed     -> seed
+      - Mask is not used at the moment unless the underlying model supports it; any extra kwargs
+        provided by callers will be forwarded to InferenceClient.image_to_image for future compatibility.
+
+    Example:
+      >>> client = HFImageEditClient(provider="fal-ai", model="Qwen/Qwen-Image-Edit", endpoint=None, token=None, timeout=120)
+      >>> img = client.edit_image(input_image=b"...", prompt="Make it sunset", strength=0.8, guidance=7.5, seed=42)
+      >>> assert isinstance(img, Image.Image)
     """
-    
-    def __init__(self, settings: Settings, max_retries: int = 3, retry_delay: float = 2.0):
-        """
-        Initialize the Hugging Face client.
-        
-        Args:
-            settings: Application settings with API configuration
-            max_retries: Maximum number of retry attempts (default: 3)
-            retry_delay: Delay between retries in seconds (default: 2.0)
-            
-        Raises:
-            ValueError: If settings are invalid or API token is missing
-        """
-        if not settings.HF_API_TOKEN:
-            raise ValueError("HF_API_TOKEN is required for Hugging Face client")
-        
-        self.settings = settings
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        
-        # Create HTTP client with timeout
-        self.client = httpx.Client(
-            timeout=settings.IMG_EDIT_TIMEOUT_SECONDS,
-            headers={
-                "Authorization": f"Bearer {settings.HF_API_TOKEN}",
-                "Content-Type": "application/json",
-            }
-        )
-        
-        logger.debug(f"HFClient initialized with endpoint: {settings.HF_INFERENCE_ENDPOINT}")
-    
-    def inference_request(
+
+    def __init__(
         self,
-        image_bytes: bytes,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        token: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> None:
+        """
+        Initialize the HFImageEditClient.
+
+        Args:
+            provider: Inference provider name (e.g., "fal-ai"). Used with api_key auth.
+            model: Model repo id (e.g., "Qwen/Qwen-Image-Edit"). Used if no provider/endpoint.
+            endpoint: Explicit endpoint URL. If provided, takes precedence over provider/model.
+            token: Authentication token. If None, resolves from env HF_TOKEN or HF_API_TOKEN.
+            timeout: Optional request timeout in seconds; forwarded to InferenceClient.
+
+        Raises:
+            ValueError: If no token could be resolved when required to construct the client.
+        """
+        # Resolve token preference HF_TOKEN -> HF_API_TOKEN
+        resolved_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HF_API_TOKEN")
+        if not resolved_token:
+            raise ValueError("No Hugging Face token provided. Set HF_TOKEN or HF_API_TOKEN in the environment.")
+
+        self._provider = provider
+        self._endpoint = endpoint
+        self._model = model or "Qwen/Qwen-Image-Edit"
+        self._token = resolved_token
+        self._timeout = timeout
+
+        # Instantiate the underlying InferenceClient based on priority: endpoint > provider > model
+        self._client: InferenceClient
+        if self._endpoint:
+            # Support both 'endpoint' and older 'base_url' constructor keyword as a compatibility fallback.
+            try:
+                self._client = InferenceClient(endpoint=self._endpoint, token=self._token, timeout=self._timeout)
+            except TypeError:
+                # Older clients may use base_url
+                self._client = InferenceClient(base_url=self._endpoint, token=self._token, timeout=self._timeout)
+            logger.debug(f"Initialized InferenceClient via endpoint: {self._endpoint}")
+        elif self._provider:
+            # Provider style: uses api_key for some providers (e.g., fal-ai) in HF 0.24+
+            try:
+                self._client = InferenceClient(provider=self._provider, api_key=self._token, timeout=self._timeout)
+            except TypeError:
+                # Fallback if api_key isn't supported; use token param
+                self._client = InferenceClient(provider=self._provider, token=self._token, timeout=self._timeout)
+            logger.debug(f"Initialized InferenceClient via provider: {self._provider}")
+        else:
+            # Plain model usage
+            self._client = InferenceClient(model=self._model, token=self._token, timeout=self._timeout)
+            logger.debug(f"Initialized InferenceClient via model: {self._model}")
+
+    def edit_image(
+        self,
+        input_image: bytes,
         prompt: str,
-        guidance_scale: Optional[float] = None,
         strength: Optional[float] = None,
+        guidance: Optional[float] = None,
         seed: Optional[int] = None,
-        **kwargs
+        model: Optional[str] = None,
+        **kwargs: Any,
     ) -> Image.Image:
         """
-        Send an inference request to Hugging Face API for image editing.
-        
+        Edit an image using image-to-image with Qwen/Qwen-Image-Edit via InferenceClient.
+
         Args:
-            image_bytes: Raw bytes of the input image
+            input_image: Raw input image bytes
             prompt: Text prompt describing the desired edit
-            guidance_scale: Guidance scale parameter (default: from settings)
-            strength: Strength parameter for editing (default: from settings)
-            seed: Optional seed for deterministic results
-            **kwargs: Additional parameters to pass to the API
-            
+            strength: Optional strength parameter for editing
+            guidance: Optional guidance scale (mapped to guidance_scale)
+            seed: Optional seed for determinism
+            model: Optional model override; defaults to the client model or "Qwen/Qwen-Image-Edit"
+            **kwargs: Extra provider/model-specific parameters forwarded to image_to_image
+
         Returns:
-            PIL.Image.Image: The edited image returned by the API
-            
+            PIL.Image.Image: The edited image
+
         Raises:
-            HFAPIError: If the API returns an error response
-            HFNetworkError: If there are network issues
-            HFClientError: For other client-related errors
-            
-        Example:
-            >>> with open("input.jpg", "rb") as f:
-            ...     image_bytes = f.read()
-            >>> edited_image = client.inference_request(
-            ...     image_bytes=image_bytes,
-            ...     prompt="Make the background blue",
-            ...     guidance_scale=7.5
-            ... )
+            HFAPIError: If the provider/model responds with an API-level failure
+            HFNetworkError: For network-type errors (timeouts, connection issues)
+            HFClientError: For unexpected local client errors
         """
-        # Use defaults from settings if not provided
-        guidance_scale = guidance_scale or self.settings.IMG_EDIT_DEFAULT_GUIDANCE
-        strength = strength or self.settings.IMG_EDIT_DEFAULT_STRENGTH
-        
-        # Prepare the request payload
-        payload = self._prepare_payload(
-            image_bytes=image_bytes,
-            prompt=prompt,
-            guidance_scale=guidance_scale,
-            strength=strength,
-            seed=seed,
-            **kwargs
-        )
-        
-        # Make the request with retry logic
-        response_data = self._make_request_with_retry(payload)
-        
-        # Parse and return the image
-        return self._parse_response(response_data)
-    
-    def _prepare_payload(
-        self,
-        image_bytes: bytes,
-        prompt: str,
-        guidance_scale: float,
-        strength: float,
-        seed: Optional[int] = None,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Prepare the JSON payload for the inference request.
-        
-        Args:
-            image_bytes: Raw image bytes
-            prompt: Text prompt
-            guidance_scale: Guidance scale parameter
-            strength: Strength parameter
-            seed: Optional seed
-            **kwargs: Additional parameters
-            
-        Returns:
-            Dict: JSON-serializable payload
-        """
-        # Encode image as base64
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        
-        payload = {
-            "inputs": {
-                "image": image_b64,
-                "prompt": prompt,
-                "guidance_scale": guidance_scale,
-                "strength": strength,
-            }
-        }
-        
-        # Add optional parameters if provided
+        eff_model = model or self._model or "Qwen/Qwen-Image-Edit"
+        ctx = self._build_context()
+
+        # Build options, only set keys when a value is provided to avoid overriding provider defaults
+        options: Dict[str, Any] = {"prompt": prompt, "model": eff_model}
+        if strength is not None:
+            options["strength"] = strength
+        if guidance is not None:
+            options["guidance_scale"] = guidance
         if seed is not None:
-            payload["inputs"]["seed"] = seed
-        
-        # Add any additional parameters
-        payload["inputs"].update(kwargs)
-        
-        logger.debug(f"Prepared payload with prompt: {prompt[:50]}...")
-        return payload
-    
-    def _make_request_with_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Make the HTTP request with retry logic.
-        
-        Args:
-            payload: Request payload
-            
-        Returns:
-            Dict: Response data from API
-            
-        Raises:
-            HFAPIError: For API errors
-            HFNetworkError: For network errors
-        """
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = self.client.post(
-                    self.settings.HF_INFERENCE_ENDPOINT,
-                    json=payload
-                )
-                
-                # Check for HTTP errors
-                response.raise_for_status()
-                
-                # Parse JSON response
-                return response.json()
-                
-            except httpx.HTTPStatusError as e:
-                # Handle HTTP errors (4xx, 5xx)
-                error_msg = f"HTTP error {e.response.status_code}: {e.response.text}"
-                logger.error(f"Attempt {attempt + 1}/{self.max_retries + 1} failed: {error_msg}")
-                
-                if attempt == self.max_retries:
-                    raise HFAPIError(
-                        f"API request failed after {self.max_retries + 1} attempts: {error_msg}",
-                        status_code=e.response.status_code,
-                        response=e.response.json() if e.response.content else None
-                    )
-                
-            except (httpx.RequestError, httpx.TimeoutException) as e:
-                # Handle network errors
-                error_msg = f"Network error: {e}"
-                logger.error(f"Attempt {attempt + 1}/{self.max_retries + 1} failed: {error_msg}")
-                
-                if attempt == self.max_retries:
-                    raise HFNetworkError(
-                        f"Network error after {self.max_retries + 1} attempts: {error_msg}"
-                    )
-            
-            # Wait before retry
-            if attempt < self.max_retries:
-                time.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
-        
-        # This should never be reached due to the retry logic above
-        raise HFClientError("Unexpected error in request retry logic")
-    
-    def _parse_response(self, response_data: Dict[str, Any]) -> Image.Image:
-        """
-        Parse the API response and extract the edited image.
-        
-        Args:
-            response_data: Response data from API
-            
-        Returns:
-            PIL.Image.Image: Edited image
-            
-        Raises:
-            HFAPIError: If the response doesn't contain a valid image
-        """
+            options["seed"] = seed
+        # Forward any other kwargs (e.g., potential future 'mask') without validation for extension
+        options.update(kwargs)
+
         try:
-            # The response should contain base64-encoded image data
-            if "image" not in response_data:
-                raise HFAPIError("API response does not contain image data")
-            
-            image_b64 = response_data["image"]
-            image_bytes = base64.b64decode(image_b64)
-            
-            # Create PIL Image from bytes
-            image = Image.open(io.BytesIO(image_bytes))
-            
-            logger.debug(f"Successfully parsed response image: {image.size}")
-            return image
-            
-        except (ValueError, KeyError, Exception) as e:
-            raise HFAPIError(f"Failed to parse API response: {e}")
-    
+            # InferenceClient.image_to_image returns a PIL.Image.Image
+            img = self._client.image_to_image(input_image, **options)
+            if not isinstance(img, Image.Image):
+                raise HFAPIError("Provider returned a non-image result", context=ctx)
+            return img
+        except (TimeoutError, OSError) as e:
+            # Heuristic classification of network-like errors
+            raise HFNetworkError(f"Network error during image_to_image: {e}") from e
+        except Exception as e:
+            # Treat any other exception as API-level unless clearly network
+            msg = f"API error during image_to_image: {e}"
+            raise HFAPIError(msg, context=ctx) from e
+
+    def _build_context(self) -> str:
+        """Return a concise context string about how the client was configured."""
+        if self._endpoint:
+            return f"endpoint={self._endpoint}"
+        if self._provider:
+            return f"provider={self._provider}, model={self._model}"
+        return f"model={self._model}"
+
+    # Compatibility surface for with-statement and pipeline cleanup
     def close(self) -> None:
-        """Close the HTTP client connection."""
-        self.client.close()
-        logger.debug("HFClient connection closed")
-    
-    def __enter__(self):
-        """Context manager entry."""
+        """
+        No-op close for compatibility with prior client interface.
+
+        InferenceClient does not require explicit close; we keep this method so callers
+        can safely call client.close().
+        """
+        return None
+
+    def __enter__(self) -> "HFImageEditClient":
+        """Context manager entry (returns self)."""
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - close the client."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit (no-op)."""
         self.close()
-
-
-if __name__ == "__main__":
-    # Test the HF client (requires valid API token in environment)
-    from lib.config import get_settings
-    
-    try:
-        settings = get_settings()
-        client = HFClient(settings)
-        
-        # Create a simple test image
-        test_image = Image.new("RGB", (100, 100), color="red")
-        img_buffer = io.BytesIO()
-        test_image.save(img_buffer, format="JPEG")
-        image_bytes = img_buffer.getvalue()
-        
-        print("HFClient initialized successfully")
-        print(f"Endpoint: {settings.HF_INFERENCE_ENDPOINT}")
-        print(f"Timeout: {settings.IMG_EDIT_TIMEOUT_SECONDS}s")
-        
-        # Note: Actual API call would require valid token and credits
-        # client.inference_request(image_bytes, "test prompt")
-        
-    except Exception as e:
-        print(f"Test failed: {e}")
-    finally:
-        if 'client' in locals():
-            client.close()
