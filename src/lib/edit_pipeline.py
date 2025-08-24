@@ -27,9 +27,8 @@ Example usage:
 
 Classes:
     ImageEditPipeline: Main pipeline orchestrator for image editing
-    PipelineError: Base exception for pipeline errors
-    ImageValidationError: Exception for image validation failures
-    PipelineTimeoutError: Exception for pipeline timeouts
+
+Uses the unified error hierarchy from lib.errors for rich context capture.
 """
 
 import os
@@ -38,24 +37,16 @@ import logging
 from typing import Dict, List, Optional, Tuple, Union
 
 from lib.config import Settings
-from lib.hf_client import HFImageEditClient, HFAPIError, HFNetworkError
-from lib.image_io import ImageIO, ImageValidationError
+from lib.hf_client import HFImageEditClient
+from lib.image_io import ImageIO
 from lib.logging_utils import get_logger, log_timing, TimingContext
+from lib.errors import (
+    PipelineError, ImageValidationError, NetworkError, ProviderApiError,
+    IoError, ValidationError, create_error_context, save_error_artifact
+)
 
 # Module-level logger
 logger = get_logger(__name__)
-
-
-class PipelineError(Exception):
-    """Base exception for pipeline-related errors."""
-    pass
-
-
-# Note: Using ImageValidationError imported from lib.image_io to avoid shadowing.
-
-class PipelineTimeoutError(PipelineError):
-    """Exception for pipeline operation timeouts."""
-    pass
 
 
 class ImageEditPipeline:
@@ -177,16 +168,48 @@ class ImageEditPipeline:
             
         except Exception as e:
             execution_time = time.perf_counter() - start_time
-            error_message = f"Pipeline failed: {e}"
-            logger.error(error_message)
+            
+            # Convert to our error hierarchy if not already
+            if not isinstance(e, PipelineError):
+                # Create rich context for the pipeline error
+                error_context = create_error_context(
+                    operation="edit_image",
+                    provider=self.settings.IMG_EDIT_PROVIDER,
+                    model=self.settings.IMG_EDIT_MODEL,
+                    endpoint=self.settings.HF_INFERENCE_ENDPOINT,
+                    elapsed_ms=execution_time * 1000,
+                    root_cause=e
+                )
+                
+                # Map to appropriate error type
+                if isinstance(e, (ProviderApiError, NetworkError)):
+                    # Already in our hierarchy, just re-raise with enhanced context
+                    raise
+                elif "permission" in str(e).lower() or "access" in str(e).lower():
+                    e = IoError(f"File access error: {e}", context=error_context)
+                elif "validation" in str(e).lower() or "invalid" in str(e).lower():
+                    e = ValidationError(f"Validation error: {e}", context=error_context)
+                else:
+                    e = PipelineError(f"Pipeline error: {e}", context=error_context)
+            
+            # Log the error with full context
+            logger.error(f"Pipeline failed: {e}")
+            
+            # Save error artifact for debugging
+            try:
+                save_error_artifact(e, "tmp/last_pipeline_error.json")
+            except Exception as save_error:
+                logger.warning(f"Failed to save pipeline error artifact: {save_error}")
             
             return {
                 "status": "error",
-                "message": error_message,
+                "message": str(e),
                 "input_path": input_path,
                 "output_path": output_path,
                 "execution_time": execution_time,
-                "error_type": type(e).__name__
+                "error_type": type(e).__name__,
+                "error_context": e.context.to_dict() if hasattr(e, 'context') else {},
+                "user_guidance": e.user_guidance if hasattr(e, 'user_guidance') else "See logs for details"
             }
     
     def _validate_inputs(self, input_path: str, output_path: str, prompt: str) -> None:
@@ -239,10 +262,19 @@ class ImageEditPipeline:
             logger.info(f"Loaded image: {input_path} ({image_info['format']}, {image_info['dimensions']})")
             return image_bytes, image_info
             
-        except ImageValidationError as e:
-            raise ImageValidationError(f"Failed to load/validate image: {e}")
         except Exception as e:
-            raise ImageValidationError(f"Unexpected error loading image: {e}")
+            error_context = create_error_context(
+                operation="image_loading",
+                provider=self.settings.IMG_EDIT_PROVIDER,
+                model=self.settings.IMG_EDIT_MODEL,
+                endpoint=self.settings.HF_INFERENCE_ENDPOINT,
+                root_cause=e
+            )
+            raise ImageValidationError(
+                f"Failed to load/validate image: {e}",
+                context=error_context,
+                user_guidance="Check that the image file exists, is readable, and in a supported format (JPEG, PNG, BMP, GIF, TIFF, WebP)."
+            ) from e
     
     def _execute_api_request(
         self,
@@ -286,15 +318,25 @@ class ImageEditPipeline:
             logger.info(f"API request completed successfully")
             return edited_image
             
-        except HFAPIError as e:
-            logger.error(f"API error: {e}")
-            raise
-        except HFNetworkError as e:
-            logger.error(f"Network error: {e}")
+        except (ProviderApiError, NetworkError) as e:
+            # These are already in our error hierarchy with rich context
+            logger.error(f"API request failed: {e}")
             raise
         except Exception as e:
+            # Wrap unexpected errors in PipelineError with context
+            error_context = create_error_context(
+                operation="api_request",
+                provider=self.settings.IMG_EDIT_PROVIDER,
+                model=self.settings.IMG_EDIT_MODEL,
+                endpoint=self.settings.HF_INFERENCE_ENDPOINT,
+                root_cause=e
+            )
             logger.error(f"Unexpected API error: {e}")
-            raise PipelineError(f"API request failed: {e}")
+            raise PipelineError(
+                f"API request failed: {e}",
+                context=error_context,
+                user_guidance="This may indicate an unexpected issue with the API client or network. Check logs for details."
+            ) from e
     
     def _save_result(self, edited_image: "Image.Image", output_path: str) -> Dict[str, any]:
         """
@@ -318,8 +360,19 @@ class ImageEditPipeline:
             return output_info
             
         except Exception as e:
+            error_context = create_error_context(
+                operation="image_saving",
+                provider=self.settings.IMG_EDIT_PROVIDER,
+                model=self.settings.IMG_EDIT_MODEL,
+                endpoint=self.settings.HF_INFERENCE_ENDPOINT,
+                root_cause=e
+            )
             logger.error(f"Failed to save image: {e}")
-            raise IOError(f"Could not save output image: {e}")
+            raise IoError(
+                f"Could not save output image: {e}",
+                context=error_context,
+                user_guidance="Check that the output directory exists and is writable. Verify available disk space."
+            ) from e
     
     def batch_edit(
         self,

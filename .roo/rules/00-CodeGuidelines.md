@@ -58,6 +58,11 @@ The development environment is a Windows 11 Pro machine, but the shells used are
 - Each artifact (GUI component, function, class, etc) should be as flexible as possible and as configurable as possible, to anticipate all possible future use-cases. 
 - Each artifact should accept multiple custom configuration options/parameters, but provide reasonable defaults for as much as possible.
 
+## Error handling, logging, reporting
+- All errors should be caught & reported
+- All details about the errors - the cause, the error condition, where in the code the error occurred, relevant parameters, etc must be recorded and reported.
+- The detailed reason/reasons for the error must be reported
+
 ## Accuracy, correctness & completeness
 - Correct, elegant, well thought out, error free code is essential
 - Speed of response is not

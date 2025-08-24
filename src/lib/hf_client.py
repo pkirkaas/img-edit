@@ -8,57 +8,29 @@ to huggingface_hub.InferenceClient. It supports provider/model/endpoint modes an
 exposes a single high-level method for image editing suitable for Qwen/Qwen-Image-Edit.
 
 Classes:
-    HFClientError: Base exception for client errors
-    HFAPIError: Exception for API-related errors
-    HFNetworkError: Exception for network-related errors
     HFImageEditClient: Thin wrapper around huggingface_hub.InferenceClient
+
+Uses the unified error hierarchy from lib.errors for rich context capture.
 """
 
 from __future__ import annotations
 
 import os
+import time
+import json
 from typing import Optional, Dict, Any
 
 from PIL import Image
 from huggingface_hub import InferenceClient
 
 from lib.logging_utils import get_logger
+from lib.errors import (
+    ProviderApiError, NetworkError, ValidationError,
+    create_error_context, save_error_artifact
+)
 
 # Module logger
 logger = get_logger(__name__)
-
-
-class HFClientError(Exception):
-    """
-    Base exception for Hugging Face client errors.
-
-    Raised when a client operation fails due to configuration, invalid arguments,
-    or unexpected runtime issues outside of pure API/network failures.
-    """
-    pass
-
-
-class HFAPIError(HFClientError):
-    """
-    Exception raised for API-related errors (server responded but failed the request).
-
-    Attributes:
-        context: Additional context describing the active client configuration (provider/endpoint/model)
-        status_code: Optional HTTP-like status code if discernible
-        response: Optional structured payload with error details
-    """
-    def __init__(self, message: str, context: Optional[str] = None, status_code: Optional[int] = None, response: Optional[Dict[str, Any]] = None) -> None:
-        self.context = context
-        self.status_code = status_code
-        self.response = response
-        super().__init__(f"{message}" + (f" | context={context}" if context else ""))
-
-
-class HFNetworkError(HFClientError):
-    """
-    Exception raised for network-related errors (timeouts, connection errors).
-    """
-    pass
 
 
 class HFImageEditClient:
@@ -83,6 +55,7 @@ class HFImageEditClient:
           seed     -> seed
       - Mask is not used at the moment unless the underlying model supports it; any extra kwargs
         provided by callers will be forwarded to InferenceClient.image_to_image for future compatibility.
+      - Uses rich error context capture with detailed diagnostics for troubleshooting
 
     Example:
       >>> client = HFImageEditClient(provider="fal-ai", model="Qwen/Qwen-Image-Edit", endpoint=None, token=None, timeout=120)
@@ -189,19 +162,107 @@ class HFImageEditClient:
         # Forward any other kwargs (e.g., potential future 'mask') without validation for extension
         options.update(kwargs)
 
+        start_time = time.perf_counter()
+        
         try:
             # InferenceClient.image_to_image returns a PIL.Image.Image
             img = self._client.image_to_image(input_image, **options)
             if not isinstance(img, Image.Image):
-                raise HFAPIError("Provider returned a non-image result", context=ctx)
+                error_context = create_error_context(
+                    operation="image_to_image",
+                    provider=self._provider,
+                    model=eff_model,
+                    endpoint=self._endpoint,
+                    start_time=start_time,
+                    request_params=options,
+                    response_text=f"Provider returned non-image result: {type(img)}"
+                )
+                raise ProviderApiError(
+                    "Provider returned a non-image result",
+                    context=error_context,
+                    user_guidance="This may indicate a provider API change or configuration issue. Check model compatibility."
+                )
             return img
-        except (TimeoutError, OSError) as e:
-            # Heuristic classification of network-like errors
-            raise HFNetworkError(f"Network error during image_to_image: {e}") from e
+            
+        except (TimeoutError, OSError, ConnectionError) as e:
+            # Network-related errors
+            error_context = create_error_context(
+                operation="image_to_image",
+                provider=self._provider,
+                model=eff_model,
+                endpoint=self._endpoint,
+                start_time=start_time,
+                request_params=options,
+                root_cause=e
+            )
+            raise NetworkError(
+                f"Network error during image editing: {e}",
+                context=error_context,
+                user_guidance="Check your internet connection and network settings. The API endpoint may be temporarily unavailable."
+            ) from e
+            
         except Exception as e:
-            # Treat any other exception as API-level unless clearly network
-            msg = f"API error during image_to_image: {e}"
-            raise HFAPIError(msg, context=ctx) from e
+            # API-level errors - attempt to extract detailed information
+            error_message = str(e)
+            http_status = None
+            request_id = None
+            response_text = error_message
+            
+            # Try to extract HTTP status from common error formats
+            if hasattr(e, 'response'):
+                try:
+                    if hasattr(e.response, 'status_code'):
+                        http_status = e.response.status_code
+                    if hasattr(e.response, 'headers'):
+                        request_id = e.response.headers.get('x-request-id')
+                    if hasattr(e.response, 'text'):
+                        response_text = e.response.text
+                except:
+                    pass
+            
+            # Try to parse JSON error responses for more details
+            parsed_error = None
+            try:
+                if response_text and response_text.strip().startswith('{'):
+                    parsed_error = json.loads(response_text)
+                    if 'error' in parsed_error:
+                        error_message = parsed_error['error']
+                    elif 'message' in parsed_error:
+                        error_message = parsed_error['message']
+            except:
+                pass
+            
+            error_context = create_error_context(
+                operation="image_to_image",
+                provider=self._provider,
+                model=eff_model,
+                endpoint=self._endpoint,
+                http_status=http_status,
+                request_id=request_id,
+                start_time=start_time,
+                request_params=options,
+                response_text=response_text,
+                root_cause=e
+            )
+            
+            # Save error artifact for debugging
+            try:
+                save_error_artifact(
+                    ProviderApiError("API error during image editing", context=error_context),
+                    "tmp/last_api_error.json"
+                )
+            except Exception as save_error:
+                logger.warning(f"Failed to save error artifact: {save_error}")
+            
+            raise ProviderApiError(
+                f"API error during image editing: {error_message}",
+                context=error_context,
+                user_guidance=(
+                    "This may indicate invalid parameters, authentication issues, or provider limitations. "
+                    "Check your API token, parameter values, and ensure the model supports your request. "
+                    f"Detailed error context saved to tmp/last_api_error.json"
+                )
+            ) from e
 
     def _build_context(self) -> str:
         """Return a concise context string about how the client was configured."""

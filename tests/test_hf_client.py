@@ -6,7 +6,7 @@ Focus:
 - Validate option mapping (prompt, model, strength, guidance_scale, seed, passthrough kwargs)
 - Validate initialization paths: provider, endpoint, model
 - Validate token preference HF_TOKEN over HF_API_TOKEN
-- Validate exception mapping to HFNetworkError and HFAPIError
+- Validate exception mapping to NetworkError and ApiError with rich context
 
 Note: Python syntax validated via ast prior to submission.
 """
@@ -21,10 +21,12 @@ from typing import Any, Dict, Optional, Tuple
 import pytest
 from PIL import Image
 
+from lib.errors import NetworkError, ApiError
+
 
 def _make_image_bytes(fmt: str = "JPEG", size: Tuple[int, int] = (6, 4), color: str = "red") -> bytes:
     """Create a tiny in-memory image and return its raw bytes."""
-    img = Image.new("RGB", size, color=color)
+    img = Image.new("极速赛车开奖结果历史记录RGB", size, color=color)
     buf = io.BytesIO()
     img.save(buf, format=fmt)
     return buf.getvalue()
@@ -50,7 +52,7 @@ class FakeInferenceClient:
         FakeInferenceClient.last_call = {"len": len(input_image), "options": dict(options)}
         if FakeInferenceClient.mode == "timeout":
             raise TimeoutError("simulated timeout")
-        if FakeInferenceClient.mode == "error":
+        if Fake极速赛车开奖结果历史记录InferenceClient.mode == "error":
             raise RuntimeError("simulated api error")
         # Return a small deterministic image
         return Image.new("RGB", (24, 12), color="blue")
@@ -125,7 +127,7 @@ def test_token_preference_hf_token_over_api_token(monkeypatch: pytest.MonkeyPatc
     assert init_kwargs.get("api_key", init_kwargs.get("token")) == "PREFERRED"
 
 
-def test_endpoint_mode_overrides_provider_model(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_endpoint_mode_overrides_provider_model(monkeypatch: pytest.MonkeyPatch极速赛车开奖结果历史记录) -> None:
     monkeypatch.setenv("HF_TOKEN", "t-endpoint")
     hf_mod = _reload_hf_with_patch(monkeypatch)
 
@@ -142,24 +144,68 @@ def test_model_mode_when_no_provider_or_endpoint(monkeypatch: pytest.MonkeyPatch
     _ = hf_mod.HFImageEditClient(provider=None, model="Some/Model", endpoint=None, token=None, timeout=None)
     init_kwargs = FakeInferenceClient.last_init["kwargs"]
     assert init_kwargs.get("model") == "Some/Model"
-    assert init_kwargs.get("token") == "t-model"
+    assert init_kwargs.get("token") == "极速赛车开奖结果历史记录t-model"
 
 
-def test_network_error_maps_to_hfnetworkerror(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_network_error_maps_to_networkerror_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that network errors include rich context information."""
     monkeypatch.setenv("HF_TOKEN", "tok")
-    hf_mod = _reload_hf_with_patch(monkeypatch)
+    hf_mod = _极速赛车开奖结果历史记录_reload_hf_with_patch(monkeypatch)
     FakeInferenceClient.mode = "timeout"
 
-    c = hf_mod.HFImageEditClient(provider="fal-ai", model=None, endpoint=None, token=None, timeout=None)
-    with pytest.raises(hf_mod.HFNetworkError):
-        c.edit_image(input_image=_make_image_bytes(), prompt="x")
+    c = hf_mod.HFImageEditClient(provider="fal-ai", model="Qwen/Qwen-Image-Edit", endpoint=None, token=None, timeout=30)
+    with pytest.raises(NetworkError) as exc_info:
+        c.edit_image(input_image=_make_image_bytes(), prompt="test prompt", strength=0.8, guidance=7.5)
+    
+    # Verify error includes context and guidance
+    assert "Network error during image_to_image" in str(exc_info.value)
+    assert exc_info.value.context is not None
+    assert "provider=fal-ai" in exc_info.value.context
+    assert "model=Qwen/Qwen-Image-Edit" in exc_info.value.context
+    assert exc_info.value.user_guidance is not None
+    assert "network connectivity" in exc_info.value.user_guidance.lower()
 
 
-def test_generic_exception_maps_to_hfapierror(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_error_maps_to_apierror_with_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that API errors include rich context information."""
     monkeypatch.setenv("HF_TOKEN", "tok")
     hf_mod = _reload_hf_with_patch(monkeypatch)
     FakeInferenceClient.mode = "error"
 
-    c = hf_mod.HFImageEditClient(provider="fal-ai", model=None, endpoint=None, token=None, timeout=None)
-    with pytest.raises(hf_mod.HFAPIError):
-        c.edit_image(input_image=_make_image_bytes(), prompt="x")
+    c = hf_mod.HFImageEditClient(provider="fal-ai", model="Qwen/Qwen-Image-Edit", endpoint=None, token=None, timeout=30)
+    with pytest.raises(ApiError) as exc_info:
+        c.edit_image(input_image=_make_image_bytes(), prompt="test prompt", strength=0.8, guidance=7.5)
+    
+    # Verify error includes context and guidance
+    assert "API error during image_to_image" in str(exc_info.value)
+    assert exc_info.value.context is not None
+    assert "provider=fal-ai" in exc_info.value.context
+    assert "model=Qwen/Qwen-Image-Edit" in exc_info.value.context
+    assert exc_info.value.user_guidance is not None
+    assert "api token" in exc_info.value.user_guidance.lower() or "credits" in exc_info.value.user_guidance.lower()
+
+
+def test_error_context_includes_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that error context includes sanitized parameters."""
+    monkeypatch.setenv("HF_TOKEN", "tok")
+    hf_mod = _reload_hf_with_patch(monkeypatch)
+    FakeInferenceClient.mode = "error"
+
+    c = hf_mod.HFImageEditClient(provider="fal-ai", model="Qwen/Qwen-Image-Edit", endpoint=None, token=None, timeout=30)
+    with pytest.raises(ApiError) as exc_info:
+        c.edit_image(
+            input_image=_make_image_bytes(),
+            prompt="Remove sunglasses and make direct eye contact",
+            strength=0.8,
+            guidance=7.5,
+            seed=42
+        )
+    
+    # Verify context includes parameters (sanitized)
+    assert exc_info.value.context is not None
+    context_str = str(exc_info.value.context)
+    assert "strength=0.8" in context_str
+    assert "guidance=7.5" in context_str
+    assert "seed=42" in context_str
+    # Prompt should be sanitized/truncated in context
+    assert "prompt=" in context_str

@@ -19,16 +19,23 @@ Integration points (core library):
 - [src/lib/hf_client.py](src/lib/hf_client.py)
 - [src/lib/image_io.py](src/lib/image_io.py)
 - [src/lib/logging_utils.py](src/lib/logging_utils.py)
+- [src/lib/errors.py](src/lib/errors.py)
 
 Notes:
 - Imports of lib.* are deferred into command handlers to avoid raising configuration
   errors when running `--help` on systems without required environment variables set.
 - Errors are reported with clear messages, while structured logs go to the logger.
+- Supports --verbose and --debug flags for detailed error reporting.
+- Saves error artifacts to tmp/last_error.json for debugging.
 """
 
 from __future__ import annotations
 
 import base64
+import json
+import logging
+import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -159,6 +166,17 @@ def edit(
         help='Model repo id to use (default: "Qwen/Qwen-Image-Edit"). Ignored if --endpoint is provided.',
         metavar="REPO",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose output with detailed error information",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug mode with full error context and artifact saving",
+    ),
 ) -> None:
     """
     Edit an image using the Qwen/Qwen-Image-Edit model via the Hugging Face Serverless API.
@@ -186,13 +204,17 @@ def edit(
     # Defer library imports to avoid config evaluation during --help
     try:
         from lib.config import Settings  # type: ignore
-        from lib.edit_pipeline import ImageEditPipeline, PipelineError  # type: ignore
-        from lib.hf_client import HFAPIError, HFNetworkError  # type: ignore
-        from lib.logging_utils import get_logger  # type: ignore
+        from lib.edit_pipeline import ImageEditPipeline  # type: ignore
+        from lib.logging_utils import get_logger, setup_logging  # type: ignore
+        from lib.errors import format_error_for_cli, save_error_artifact  # type: ignore
     except Exception as e:
         typer.secho(f"Failed to import application modules: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
+    # Configure logging based on verbosity
+    log_level = logging.DEBUG if debug else (logging.INFO if verbose else logging.WARNING)
+    setup_logging(level=log_level, filename="logs/imgedit.log" if debug else None)
+    
     logger = get_logger(__name__)
 
     # Ensure output directory exists to satisfy pipeline validation
@@ -259,21 +281,71 @@ def edit(
             typer.echo(f"Image: {result.get('image_format')} {result.get('image_dimensions')}")
             typer.echo(f"Size: {result.get('file_size')} bytes")
             typer.echo(f"Time: {result.get('execution_time'):.2f}s")
+            
+            # Save success artifact in debug mode
+            if debug:
+                # Use model_dump() for Pydantic v2, fallback to dict() or vars()
+                settings_dict = {}
+                if hasattr(settings, 'model_dump'):
+                    settings_dict = settings.model_dump()
+                elif hasattr(settings, 'dict'):
+                    settings_dict = settings.dict()
+                else:
+                    settings_dict = vars(settings)
+                
+                success_artifact = {
+                    "status": "success",
+                    "result": result,
+                    "settings": settings_dict,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                }
+                os.makedirs("tmp", exist_ok=True)
+                with open("tmp/last_success.json", "w") as f:
+                    json.dump(success_artifact, f, indent=2)
+                logger.debug("Success artifact saved to tmp/last_success.json")
+                
             raise typer.Exit(code=0)
         else:
-            typer.secho(f"Edit failed: {message}", fg=typer.colors.RED, err=True)
+            # Error result from pipeline
+            error_message = format_error_for_cli(Exception(message), verbose or debug)
+            typer.secho(f"Edit failed: {error_message}", fg=typer.colors.RED, err=True)
+            
+            # Save error artifact in debug mode or if verbose
+            if debug or verbose:
+                # Use model_dump() for Pydantic v2, fallback to dict() or vars()
+                settings_dict = {}
+                if hasattr(settings, 'model_dump'):
+                    settings_dict = settings.model_dump()
+                elif hasattr(settings, 'dict'):
+                    settings_dict = settings.dict()
+                else:
+                    settings_dict = vars(settings)
+                
+                error_artifact = result.copy()
+                error_artifact["settings"] = settings_dict
+                error_artifact["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                os.makedirs("tmp", exist_ok=True)
+                with open("tmp/last_error.json", "w") as f:
+                    json.dump(error_artifact, f, indent=2)
+                logger.debug("Error artifact saved to tmp/last_error.json")
+                
             raise typer.Exit(code=1)
 
-    except (HFAPIError, HFNetworkError, PipelineError, FileNotFoundError, PermissionError, ValueError) as e:
-        typer.secho(f"{type(e).__name__}: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    except typer.Exit:
-        # Preserve Typer's exit semantics without additional noise
-        raise
     except Exception as e:
-        # Catch-all for unexpected errors: log full stack and show the exception detail to the user
-        logger.exception("Unexpected error during CLI edit")
-        typer.secho(f"Unexpected error: {e}", fg=typer.colors.RED, err=True)
+        # Format error based on verbosity - use our error formatting function
+        from lib.errors import format_error_for_cli
+        error_message = format_error_for_cli(e, verbose or debug)
+        typer.secho(f"{error_message}", fg=typer.colors.RED, err=True)
+        
+        # Save error artifact in debug mode
+        if debug:
+            try:
+                from lib.errors import save_error_artifact
+                save_error_artifact(e, "tmp/last_error.json")
+                logger.debug("Error artifact saved to tmp/last_error.json")
+            except Exception as save_error:
+                logger.warning(f"Failed to save error artifact: {save_error}")
+        
         raise typer.Exit(code=1)
 
 

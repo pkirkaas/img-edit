@@ -9,7 +9,8 @@ the new InferenceClient approach where configuration can be provided via either:
 - endpoint (overrides provider/model if present)
 - model + token (fallback)
 
-Token resolution prefers HF_TOKEN over HF_API_TOKEN.
+Token resolution prefers HF_TOKEN over HF_API_TOKEN. Includes rich error handling with
+context and user guidance for better diagnostics.
 
 Environment variables (preferred names):
 - HF_TOKEN (preferred) / HF_API_TOKEN (fallback)
@@ -30,8 +31,27 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
+from lib.errors import ValidationError, create_error_context
+
 # Load environment variables from .env file (if present)
 load_dotenv()
+
+
+class ConfigurationError(ValidationError):
+    """
+    Exception type for configuration validation issues.
+    
+    Raised when configuration settings are invalid, missing, or inconsistent.
+    Includes rich context and user guidance for resolution.
+    
+    Attributes:
+        context: Error context with configuration details
+        user_guidance: Helpful guidance for resolving the configuration issue
+        
+    Example:
+        >>> raise ConfigurationError("Missing Hugging Face token", context=ctx, user_guidance="Set HF_TOKEN environment variable")
+    """
+    pass
 
 
 class Settings(BaseSettings):
@@ -115,7 +135,17 @@ class Settings(BaseSettings):
         if not v2:
             return None
         if not v2.startswith(("http://", "https://")):
-            raise ValueError("HF_INFERENCE_ENDPOINT must be a valid HTTP/HTTPS URL when provided")
+            error_context = create_error_context(
+                operation="config_validation",
+                field="HF_INFERENCE_ENDPOINT",
+                value=v,
+                root_cause=ValueError()
+            )
+            raise ConfigurationError(
+                "HF_INFERENCE_ENDPOINT must be a valid HTTP/HTTPS URL when provided",
+                context=error_context,
+                user_guidance="Provide a valid URL starting with http:// or https://, or leave it unset to use provider/model."
+            )
         return v2.rstrip("/")
 
     # Convenience helpers
@@ -126,8 +156,32 @@ class Settings(BaseSettings):
 
         Returns:
             Optional[str]: The resolved token value, or None if not set
+            
+        Raises:
+            ConfigurationError: If token validation is required and no token is found
         """
-        return self.HF_TOKEN or self.HF_API_TOKEN
+        token = self.HF_TOKEN or self.HF_API_TOKEN
+        return token
+
+    def validate_token_required(self) -> None:
+        """
+        Validate that a Hugging Face token is configured.
+        
+        Raises:
+            ConfigurationError: If no token is configured with guidance
+        """
+        token = self.get_token()
+        if not token:
+            error_context = create_error_context(
+                operation="config_validation",
+                field="HF_TOKEN/HF_API_TOKEN",
+                root_cause=ValueError("No Hugging Face token configured")
+            )
+            raise ConfigurationError(
+                "No Hugging Face token provided",
+                context=error_context,
+                user_guidance="Set HF_TOKEN (preferred) or HF_API_TOKEN environment variable with your Hugging Face API token."
+            )
 
 
 # Global settings instance (safe even without tokens; token is validated later at client usage)

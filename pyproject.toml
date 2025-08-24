@@ -15,7 +15,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "typer>=0.12.5",
     "rich>=13.7",
-    "tqdm>=4.66"
+    "tqdm>=4.66",
+    "replicate>=1.0.7"
 ]
 requires-python = ">=3.13"
 readme = "README.md"

@@ -5,10 +5,16 @@ This module provides centralized logging configuration and utility functions
 for consistent logging across all application components. It includes a timing
 decorator for performance monitoring and structured logging setup.
 
+Features:
+- Structured JSON logging for errors with rich context
+- Human-readable console output
+- File logging with rotation support
+- Error-specific formatting with detailed diagnostics
+
 Example usage:
     >>> from lib.logging_utils import get_logger, log_timing
     >>> logger = get_logger(__name__)
-    >>> 
+    >>>
     >>> @log_timing
     ... def slow_function():
     ...     # Function implementation
@@ -18,13 +24,15 @@ Functions:
     get_logger: Get a configured logger instance for a module
     log_timing: Decorator to log function execution time
     setup_logging: Configure the root logger with desired settings
+    setup_structured_logging: Configure JSON-structured logging for errors
 """
 
+import json
 import logging
 import time
 from datetime import datetime
 from functools import wraps
-from typing import Any, Callable, Optional, TypeVar, cast
+from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
 # Type variable for generic function wrapping
 F = TypeVar("F", bound=Callable[..., Any])
@@ -33,15 +41,67 @@ F = TypeVar("F", bound=Callable[..., Any])
 DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# JSON log format for structured logging
+JSON_LOG_FORMAT = "%(message)s"
+
 # Default log level
 DEFAULT_LOG_LEVEL = logging.INFO
+
+# Default log file settings
+DEFAULT_LOG_FILE = "logs/imgedit.log"
+MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
+BACKUP_COUNT = 5
+
+
+class StructuredFormatter(logging.Formatter):
+    """
+    Formatter for structured JSON logging of error messages.
+    
+    This formatter converts log records with error context into JSON format
+    for better machine readability and analysis.
+    """
+    
+    def format(self, record: logging.LogRecord) -> str:
+        """
+        Format the specified record as JSON if it contains structured data.
+        
+        Args:
+            record: Log record to format
+            
+        Returns:
+            str: JSON string for structured data, or regular format for other messages
+        """
+        # Check if this is an error with structured context
+        if (hasattr(record, 'structured_data') and
+            record.levelno >= logging.ERROR and
+            isinstance(record.structured_data, dict)):
+            
+            # Create structured log entry
+            structured_log = {
+                "timestamp": datetime.fromtimestamp(record.created).isoformat() + "Z",
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "data": record.structured_data
+            }
+            
+            # Add exception info if available
+            if record.exc_info:
+                structured_log["exception"] = self.formatException(record.exc_info)
+            
+            return json.dumps(structured_log, default=str)
+        
+        # Fall back to default formatting for non-error or non-structured messages
+        return super().format(record)
 
 
 def setup_logging(
     level: int = DEFAULT_LOG_LEVEL,
     format: str = DEFAULT_LOG_FORMAT,
     date_format: str = DEFAULT_DATE_FORMAT,
-    filename: Optional[str] = None
+    filename: Optional[str] = None,
+    max_size: int = MAX_LOG_SIZE,
+    backup_count: int = BACKUP_COUNT
 ) -> None:
     """
     Configure the root logger with specified settings.
@@ -54,6 +114,8 @@ def setup_logging(
         format: Log message format string
         date_format: Date format for timestamps
         filename: Optional file path for file logging. If None, logs to console only.
+        max_size: Maximum log file size in bytes before rotation
+        backup_count: Number of backup files to keep
         
     Example:
         >>> setup_logging(level=logging.DEBUG, filename="app.log")
@@ -78,13 +140,85 @@ def setup_logging(
     # Add file handler if filename is provided
     if filename:
         try:
-            file_handler = logging.FileHandler(filename, encoding="utf-8")
+            # Ensure log directory exists
+            from pathlib import Path
+            log_path = Path(filename)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Use RotatingFileHandler for log rotation
+            from logging.handlers import RotatingFileHandler
+            file_handler = RotatingFileHandler(
+                filename,
+                maxBytes=max_size,
+                backupCount=backup_count,
+                encoding="utf-8"
+            )
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
-        except (IOError, PermissionError) as e:
+        except (IOError, PermissionError, OSError) as e:
             root_logger.error(f"Failed to create file handler for {filename}: {e}")
     
     root_logger.info(f"Logging configured with level {logging.getLevelName(level)}")
+
+
+def setup_structured_logging(
+    level: int = DEFAULT_LOG_LEVEL,
+    filename: str = DEFAULT_LOG_FILE,
+    max_size: int = MAX_LOG_SIZE,
+    backup_count: int = BACKUP_COUNT
+) -> None:
+    """
+    Configure structured JSON logging for error diagnostics.
+    
+    This setup is specifically designed for error reporting and includes
+    JSON formatting for machine-readable log analysis.
+    
+    Args:
+        level: Logging level
+        filename: Log file path for structured logs
+        max_size: Maximum log file size before rotation
+        backup_count: Number of backup files to keep
+    """
+    # Clear existing handlers
+    logging.getLogger().handlers.clear()
+    
+    # Create structured formatter for errors
+    structured_formatter = StructuredFormatter(JSON_LOG_FORMAT)
+    
+    # Console handler with regular formatting
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(DEFAULT_LOG_FORMAT, DEFAULT_DATE_FORMAT)
+    console_handler.setFormatter(console_formatter)
+    
+    # File handler with structured formatting
+    try:
+        from pathlib import Path
+        from logging.handlers import RotatingFileHandler
+        
+        log_path = Path(filename)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = RotatingFileHandler(
+            filename,
+            maxBytes=max_size,
+            backupCount=backup_count,
+            encoding="utf-8"
+        )
+        file_handler.setFormatter(structured_formatter)
+        
+        root_logger = logging.getLogger()
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(level)
+        
+        root_logger.info(f"Structured logging configured with level {logging.getLevelName(level)}")
+        
+    except (IOError, PermissionError, OSError) as e:
+        # Fall back to console-only logging if file logging fails
+        root_logger = logging.getLogger()
+        root_logger.addHandler(console_handler)
+        root_logger.setLevel(level)
+        root_logger.error(f"Failed to configure structured file logging: {e}")
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -92,13 +226,13 @@ def get_logger(name: str) -> logging.Logger:
     Get a configured logger instance for the specified module.
     
     This function returns a logger instance with the given name, ensuring
-    it inherits the root logger's configuration.
+    it inherits the root logger's configuration and supports structured logging.
     
     Args:
         name: Logger name (typically __name__ of the module)
         
     Returns:
-        logging.Logger: Configured logger instance
+        logging.Logger: Configured logger instance with structured logging support
         
     Example:
         >>> logger = get_logger(__name__)
@@ -107,9 +241,40 @@ def get_logger(name: str) -> logging.Logger:
         >>> logger.warning("Warning message")
         >>> logger.error("Error message")
         >>> logger.critical("Critical message")
+        
+        # Structured error logging
+        >>> try:
+        ...     raise ValueError("Test error")
+        ... except Exception as e:
+        ...     logger.error("Operation failed", extra={"structured_data": {"error": str(e)}})
     """
     logger = logging.getLogger(name)
     return logger
+
+
+def log_error_with_context(
+    logger: logging.Logger,
+    message: str,
+    error_context: Dict[str, Any],
+    exc_info: Optional[Exception] = None
+) -> None:
+    """
+    Log an error with structured context data for better diagnostics.
+    
+    This helper function ensures consistent error logging with rich context
+    that can be parsed by monitoring systems.
+    
+    Args:
+        logger: Logger instance to use
+        message: Error message
+        error_context: Dictionary with error context (operation, provider, etc.)
+        exc_info: Optional exception for stack trace inclusion
+    """
+    logger.error(
+        message,
+        extra={"structured_data": error_context},
+        exc_info=exc_info
+    )
 
 
 def log_timing(level: int = logging.INFO) -> Callable[[F], F]:

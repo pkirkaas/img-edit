@@ -5,7 +5,7 @@
 groups = ["default"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:5d503fd2c2df0ee4aa3d49a50a988bf3129f267cb68646aaf8542338f056f3f0"
+content_hash = "sha256:7d2d4f1e2f4943b5c8cd6c756501e3f70093845b4ee0696fadf64977e5be7586"
 
 [[metadata.targets]]
 requires_python = "==3.13.*"
@@ -110,7 +110,7 @@ name = "diffusers"
 version = "0.36.0.dev0"
 requires_python = ">=3.8.0"
 git = "https://github.com/huggingface/diffusers"
-revision = "673d4357ff9f085f6f2cd9eebaff23fd1fd9990a"
+revision = "a840c39ad8de04b242168e24c097371ba188f0e5"
 summary = "State-of-the-art diffusion in PyTorch and JAX."
 groups = ["default"]
 marker = "python_version == \"3.13\""
@@ -504,6 +504,24 @@ files = [
     {file = "regex-2025.7.34-cp313-cp313-win_amd64.whl", hash = "sha256:9d644de5520441e5f7e2db63aec2748948cc39ed4d7a87fd5db578ea4043d997"},
     {file = "regex-2025.7.34-cp313-cp313-win_arm64.whl", hash = "sha256:7bf1c5503a9f2cbd2f52d7e260acb3131b07b6273c470abb78568174fe6bde3f"},
     {file = "regex-2025.7.34.tar.gz", hash = "sha256:9ead9765217afd04a86822dfcd4ed2747dfe426e887da413b15ff0ac2457e21a"},
+]
+
+[[package]]
+name = "replicate"
+version = "1.0.7"
+requires_python = ">=3.8"
+summary = "Python client for Replicate"
+groups = ["default"]
+marker = "python_version == \"3.13\""
+dependencies = [
+    "httpx<1,>=0.21.0",
+    "packaging",
+    "pydantic>1.10.7",
+    "typing-extensions>=4.5.0",
+]
+files = [
+    {file = "replicate-1.0.7-py3-none-any.whl", hash = "sha256:667c50a9eb83be17de6278ff89483102b3b50f49a2c7fbcaa2e2b14df13816f9"},
+    {file = "replicate-1.0.7.tar.gz", hash = "sha256:d88cb2c37ba39fb370c87fc3291601c67aae64bb918a20a85b5ce399c23ee84c"},
 ]
 
 [[package]]

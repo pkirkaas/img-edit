@@ -2,7 +2,8 @@
 Image input/output operations for the image editing application.
 
 This module provides functions for loading, saving, and validating images using the Pillow library.
-It handles common image formats and provides robust error handling for file operations.
+It handles common image formats and provides robust error handling for file operations with rich
+context and user guidance for better diagnostics.
 
 Supported image formats:
     - JPEG/JPG
@@ -30,6 +31,8 @@ from pathlib import Path
 from typing import Optional, Union, Dict, Tuple, Any
 
 from PIL import Image, ImageFile, UnidentifiedImageError
+
+from lib.errors import ValidationError, create_error_context
 
 # Enable loading of truncated images (useful for some corrupt but recoverable images)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -61,15 +64,19 @@ __all__ = [
 ]
 
 
-class ImageValidationError(Exception):
+class ImageValidationError(ValidationError):
     """
     Exception type for image validation or loading issues encountered by ImageIO.
 
     Raised when an image cannot be found, read, identified, or is in an unsupported format
-    for the purposes of the editing pipeline.
+    for the purposes of the editing pipeline. Includes rich context and user guidance.
+
+    Attributes:
+        context: Error context with operation details
+        user_guidance: Helpful guidance for resolving the issue
 
     Example:
-        >>> raise ImageValidationError("Unsupported image format: ICO")
+        >>> raise ImageValidationError("Unsupported image format: ICO", context=ctx, user_guidance="Use JPEG or PNG")
     """
     pass
 
@@ -114,9 +121,27 @@ class ImageIO:
             img.save(buf, format=encode_format)
             return buf.getvalue(), {"format": encode_format, "dimensions": img.size}
         except (FileNotFoundError, PermissionError, UnidentifiedImageError, ValueError) as e:
-            raise ImageValidationError(str(e)) from e
+            error_context = create_error_context(
+                operation="image_loading",
+                file_path=str(path),
+                root_cause=e
+            )
+            raise ImageValidationError(
+                f"Failed to load image: {e}",
+                context=error_context,
+                user_guidance="Check that the file exists, is readable, and is in a supported format (JPEG, PNG, BMP, GIF, TIFF, WebP)."
+            ) from e
         except Exception as e:
-            raise ImageValidationError(f"Unexpected image load error: {e}") from e
+            error_context = create_error_context(
+                operation="image_loading",
+                file_path=str(path),
+                root_cause=e
+            )
+            raise ImageValidationError(
+                f"Unexpected error loading image: {e}",
+                context=error_context,
+                user_guidance="This may indicate a corrupted file or system issue. Try with a different image file."
+            ) from e
 
     def save_image(self, edited_image: Image.Image, path: Union[str, Path]) -> Dict[str, Any]:
         """
@@ -168,11 +193,29 @@ def load_image(path: Union[str, Path]) -> Image.Image:
     
     # Check if file exists
     if not path.exists():
-        raise FileNotFoundError(f"Image file not found: {path}")
+        error_context = create_error_context(
+            operation="image_loading",
+            file_path=str(path),
+            root_cause=FileNotFoundError()
+        )
+        raise ImageValidationError(
+            f"Image file not found: {path}",
+            context=error_context,
+            user_guidance="Check the file path and ensure the image exists at the specified location."
+        )
     
     # Check if file is readable
     if not os.access(path, os.R_OK):
-        raise PermissionError(f"Permission denied: cannot read file {path}")
+        error_context = create_error_context(
+            operation="image_loading",
+            file_path=str(path),
+            root_cause=PermissionError()
+        )
+        raise ImageValidationError(
+            f"Permission denied: cannot read file {path}",
+            context=error_context,
+            user_guidance="Check file permissions and ensure the application has read access to the file."
+        )
     
     try:
         # Open the image
@@ -190,9 +233,27 @@ def load_image(path: Union[str, Path]) -> Image.Image:
         return image
         
     except UnidentifiedImageError as e:
-        raise UnidentifiedImageError(f"Could not identify image file {path}: {e}")
+        error_context = create_error_context(
+            operation="image_loading",
+            file_path=str(path),
+            root_cause=e
+        )
+        raise ImageValidationError(
+            f"Could not identify image file {path}: {e}",
+            context=error_context,
+            user_guidance="The file may be corrupted or not a valid image. Try with a different image file."
+        ) from e
     except Exception as e:
-        raise RuntimeError(f"Error loading image {path}: {e}")
+        error_context = create_error_context(
+            operation="image_loading",
+            file_path=str(path),
+            root_cause=e
+        )
+        raise ImageValidationError(
+            f"Error loading image {path}: {e}",
+            context=error_context,
+            user_guidance="This may indicate a system or file corruption issue. Verify the image file integrity."
+        ) from e
 
 
 def save_image(image: Image.Image, path: Union[str, Path], **kwargs) -> Dict[str, Any]:
@@ -251,7 +312,17 @@ def save_image(image: Image.Image, path: Union[str, Path], **kwargs) -> Dict[str
     try:
         img_to_save.save(path, format=fmt, **save_args)
     except Exception as e:
-        raise RuntimeError(f"Error saving image to {path}: {fmt}: {e}")
+        error_context = create_error_context(
+            operation="image_saving",
+            file_path=str(path),
+            format=fmt,
+            root_cause=e
+        )
+        raise ValidationError(
+            f"Error saving image to {path}: {fmt}: {e}",
+            context=error_context,
+            user_guidance="Check that the destination directory exists and is writable. Verify available disk space."
+        ) from e
 
     # Gather output metadata
     file_size = path.stat().st_size
@@ -290,7 +361,16 @@ def load_mask(path: Union[str, Path]) -> Optional[Image.Image]:
     
     # Check if file exists
     if not path.exists():
-        raise FileNotFoundError(f"Mask file not found: {path}")
+        error_context = create_error_context(
+            operation="mask_loading",
+            file_path=str(path),
+            root_cause=FileNotFoundError()
+        )
+        raise ImageValidationError(
+            f"Mask file not found: {path}",
+            context=error_context,
+            user_guidance="Check the mask file path and ensure it exists at the specified location."
+        )
     
     try:
         # Load the mask image
@@ -303,7 +383,16 @@ def load_mask(path: Union[str, Path]) -> Optional[Image.Image]:
         return mask
         
     except Exception as e:
-        raise RuntimeError(f"Error loading mask {path}: {e}")
+        error_context = create_error_context(
+            operation="mask_loading",
+            file_path=str(path),
+            root_cause=e
+        )
+        raise ImageValidationError(
+            f"Error loading mask {path}: {e}",
+            context=error_context,
+            user_guidance="Check that the mask file is a valid image in a supported format and is readable."
+        ) from e
 
 
 def validate_image_format(image: Image.Image) -> None:
@@ -321,9 +410,16 @@ def validate_image_format(image: Image.Image) -> None:
     """
     format = image.format
     if format and format.upper() not in SUPPORTED_FORMATS:
-        raise ValueError(
-            f"Unsupported image format: {format}. "
-            f"Supported formats: {sorted(SUPPORTED_FORMATS)}"
+        error_context = create_error_context(
+            operation="image_validation",
+            detected_format=format,
+            supported_formats=list(SUPPORTED_FORMATS),
+            root_cause=ValueError()
+        )
+        raise ImageValidationError(
+            f"Unsupported image format: {format}",
+            context=error_context,
+            user_guidance=f"Supported formats: {sorted(SUPPORTED_FORMATS)}. Convert the image to a supported format before processing."
         )
 
 
