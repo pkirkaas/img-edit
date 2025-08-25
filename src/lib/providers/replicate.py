@@ -151,6 +151,7 @@ class ReplicateProvider(ImageEditProvider):
                 - model: Specific Replicate model to use (default: "qwen/qwen-image-edit")
                 - num_inference_steps: Number of diffusion steps
                 - negative_prompt: Negative prompt for guidance
+                - disable_safety_checker: Whether to disable the model's safety checker (default: True)
 
         Returns:
             Image.Image: The edited image as a PIL Image object
@@ -194,6 +195,11 @@ class ReplicateProvider(ImageEditProvider):
                 "guidance_scale": guidance_scale,
                 **kwargs
             }
+
+            # Ensure Replicate safety checker is disabled by default unless explicitly overridden
+            if "disable_safety_checker" not in input_params:
+                # Many Replicate SD-based models accept a boolean; some accept 1/0. Use True which serializes to JSON true.
+                input_params["disable_safety_checker"] = True
 
             # Add optional parameters if provided
             if seed is not None:

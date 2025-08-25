@@ -180,7 +180,7 @@ class ImageEditPipeline:
                     provider=self.provider.name,
                     model=self.settings.IMG_EDIT_MODEL,
                     endpoint=self.settings.HF_INFERENCE_ENDPOINT,
-                    elapsed_ms=execution_time * 1000,
+                    start_time=start_time,
                     root_cause=e
                 )
                 
