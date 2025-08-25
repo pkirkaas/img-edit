@@ -2,9 +2,9 @@
 Tests for the edit pipeline in [src/lib/edit_pipeline.py](src/lib/edit_pipeline.py).
 
 Focus:
-- Integration of pipeline stages with mocked ImageIO and HFClient
+- Integration of pipeline stages with mocked ImageIO and Provider
 - edit_image success path with and without mask
-- Error propagation from client and image processing layers with rich context
+- Error propagation from provider and image processing layers with rich context
 - Validation behavior regarding output directory, etc.
 
 External dependencies are fully mocked to avoid real I/O and network calls.
@@ -13,13 +13,18 @@ Note: Python syntax validated via ast prior to submission.
 """
 from __future__ import annotations
 
+import os
+# Set environment variables before any imports to avoid config validation errors
+os.environ["HF_API_TOKEN"] = "unit-test-token"
+os.environ["PROVIDERS__replicate__provider_type"] = "replicate"
+
 import importlib
 import io
 import sys
 import types
 import logging
-from path极速赛车开奖结果历史记录lib import Path
-from typing import Any, Dict, Generator, Tuple
+from pathlib import Path
+from typing import Any, Dict, Generator, Tuple, Optional
 
 import pytest
 from PIL import Image
@@ -55,82 +60,75 @@ class FakeImageIO:
         }
 
 
-class FakeHFClient:
+class FakeProvider:
     """
-    HFImageEditClient stub capturing invocation details and optionally raising errors.
+    ImageEditProvider stub capturing invocation details and optionally raising errors.
 
     Class attributes:
       - raise_mode: None | "api" | "network"
-      - EXC_API /极速赛车开奖结果历史记录 EXC_NET: exception classes to raise (bound at runtime in tests)
+      - EXC_API / EXC_NET: exception classes to raise (bound at runtime in tests)
     """
     raise_mode: str | None = None
     EXC_API: type[BaseException] = Exception
     EXC_NET: type[BaseException] = Exception
 
-    def __init__(
-        self,
-        provider: str | None = None,
-        model: str | None = None,
-        endpoint: str | None = None,
-        token: str | None = None,
-        timeout: int | None = None,
-        **_: Any,
-    ):
-        # Store basic config for potential assertions
-        self.provider = provider
-        self.model = model
-        self.endpoint = endpoint
-        self.token = token
-        self.timeout = timeout
+    def __init__(self):
         self.last_call: Dict[str, Any] | None = None
+
+    @property
+    def name(self) -> str:
+        return "replicate"  # Match default provider name
+
+    @property
+    def description(self) -> str:
+        return "Fake provider for testing"
 
     def edit_image(
         self,
-        input_image: bytes,
-        prompt: str,
-        strength: float | None = None,
-        guidance: float | None = None,
-        seed: int | None = None,
-        **kwargs: Any,
+        image: Image.Image,
+        instructions: str,
+        strength: float = 0.8,
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        mask: Optional[Image.Image] = None,
+        **kwargs: Any
     ) -> Image.Image:
-        if FakeHFClient.raise_mode == "api":
+        if FakeProvider.raise_mode == "api":
             # Create a rich ApiError with context
             context = create_error_context(
-                operation="image_to_image",
-                provider=self.provider,
-                model=self.model,
-                endpoint=self.endpoint,
+                operation="image_edit",
+                provider=self.name,
                 parameters={
-                    "prompt": prompt,
+                    "instructions": instructions,
                     "strength": strength,
-                    "guidance": guidance,
+                    "guidance_scale": guidance_scale,
                     "seed": seed,
+                    "mask_provided": mask is not None,
                     **kwargs
                 }
             )
             raise ApiError("API error during image editing", context=context)
-        if FakeHFClient.raise_mode == "network":
+        if FakeProvider.raise_mode == "network":
             # Create a rich NetworkError with context
             context = create_error_context(
-                operation="极速赛车开奖结果历史记录image_to_image",
-                provider=self.provider,
-                model=self.model,
-                endpoint=self.endpoint
+                operation="image_edit",
+                provider=self.name
             )
             raise NetworkError("Network error during image editing", context=context)
         # Record invocation for assertions
         self.last_call = {
-            "image_bytes_len": len(input_image),
-            "prompt": prompt,
-            "guidance": guidance,
+            "image_size": image.size,
+            "instructions": instructions,
             "strength": strength,
+            "guidance_scale": guidance_scale,
             "seed": seed,
-            "极速赛车开奖结果历史记录kwargs": kwargs,
+            "mask_provided": mask is not None,
+            "kwargs": kwargs,
         }
         # Return a predictable image
         return Image.new("RGB", (24, 12), color="blue")
 
-    def close(self) -> None:  # compatibility with pipeline
+    def close(self) -> None:
         pass
 
 
@@ -140,11 +138,13 @@ def pipeline_with_stubs(monkeypatch: pytest.MonkeyPatch) -> Generator[Any, None,
     Fixture that:
       - Ensures required env var for lib.config import
       - Injects a stub module for lib.image_io so edit_pipeline can import ImageIO
-      - Imports lib.edit_pipeline and patches HFClient with a stub
+      - Imports lib.edit_pipeline and patches provider registry to use fake provider
     Yields the imported pipeline module.
     """
-    # Ensure settings can import (global settings = Settings极速赛车开奖结果历史记录() runs on import)
+    # Ensure settings can import (global settings = Settings() runs on import)
     monkeypatch.setenv("HF_API_TOKEN", "unit-test-token")
+    # Configure default provider to avoid validation errors
+    monkeypatch.setenv("PROVIDERS__replicate__provider_type", "replicate")
 
     # Create stub lib.image_io module with the expected names
     stub_mod = types.ModuleType("lib.image_io")
@@ -156,26 +156,36 @@ def pipeline_with_stubs(monkeypatch: pytest.MonkeyPatch) -> Generator[Any, None,
     setattr(stub_mod, "ImageValidationError", ImageValidationError)
 
     # Inject the stub before importing the pipeline
-    monkeypatch.setitem(sys.modules, "lib.image_极速赛车开奖结果历史记录io", stub_mod, raising=False)
+    monkeypatch.setitem(sys.modules, "lib.image_io", stub_mod, raising=False)
 
     # Now import the pipeline module
     pipeline_mod = importlib.import_module("lib.edit_pipeline")
     # Inject missing 'logging' symbol used by the pipeline for TimingContext levels
     monkeypatch.setattr(pipeline_mod, "logging", logging, raising=False)
     
-    # Bind exception classes for the HF stub now that lib.hf_client is importable safely
-    hf_mod = importlib.import_module("lib.hf_client")
-    FakeHFClient.EXC_API = hf_mod.ApiError
-    FakeHFClient.EXC_NET = hf_mod.NetworkError
+    # Bind exception classes for the provider stub now that lib.errors is importable
+    errors_mod = importlib.import_module("lib.errors")
+    FakeProvider.EXC_API = errors_mod.ApiError
+    FakeProvider.EXC_NET = errors_mod.NetworkError
     
-    # Patch the pipeline's HFImageEditClient reference to our stub
-    monkeypatch.setattr(pipeline_mod, "HFImageEditClient", FakeHFClient, raising=True)
+    # Create a fake provider instance for testing
+    fake_provider = FakeProvider()
+    
+    # Patch the provider registry to return our fake provider
+    def mock_get_provider_class(name: str):
+        if name == "replicate":
+            return FakeProvider
+        raise KeyError(f"Provider '{name}' not found")
+    
+    # Import and patch the provider registry
+    providers_mod = importlib.import_module("lib.providers")
+    monkeypatch.setattr(providers_mod.get_registry(), "get_provider_class", mock_get_provider_class)
 
     try:
         yield pipeline_mod
     finally:
         # Reset raise mode after each test
-        FakeHFClient.raise_mode = None
+        FakeProvider.raise_mode = None
 
 
 def _create_dummy_input_file(path: Path) -> None:
@@ -207,10 +217,10 @@ def test_pipeline_success_without_mask(tmp_path: Path, pipeline_with_stubs: Any)
     assert output_path.exists() and output_path.stat().st_size > 0
     assert result["file_size"] == output_path.stat().st_size
     assert result["image_format"] == "JPEG"
-    assert result["image_dimensions"] == (24, 12)  # from FakeHFClient returned image
+    assert result["image_dimensions"] == (24, 12)  # from FakeProvider returned image
 
 
-def test_pipeline_success_with_mask_forwards_to_client(tmp_path: Path, pipeline_with_stubs: Any) -> None:
+def test_pipeline_success_with_mask_forwards_to_provider(tmp_path: Path, pipeline_with_stubs: Any) -> None:
     pipeline_mod = pipeline_with_stubs
     from lib.config import Settings
 
@@ -228,18 +238,18 @@ def test_pipeline_success_with_mask_forwards_to_client(tmp_path: Path, pipeline_
         mask="some-base64-mask",
     )
     assert result["status"] == "success"
-    # Verify the HF client saw the mask
-    assert isinstance(pipe.hf_client, FakeHFClient)
-    assert pipe.hf_client.last_call is not None
-    assert pipe.hf_client.last_call["kwargs"].get("mask") == "some-base64-mask"
+    # Verify the provider saw the mask
+    # Note: The pipeline converts mask string to Image object, so we check if mask was provided
+    assert hasattr(pipe, 'provider') and pipe.provider.last_call is not None
+    assert pipe.provider.last_call["mask_provided"] is True
 
 
-def test_pipeline_client_api_error_returns_error_status_with_context(tmp_path: Path, pipeline_with_stubs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pipeline_provider_api_error_returns_error_status_with_context(tmp_path: Path, pipeline_with_stubs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     pipeline_mod = pipeline_with_stubs
     from lib.config import Settings
 
-    # Configure stub client to raise API error
-    FakeHFClient.raise_mode = "api"
+    # Configure stub provider to raise API error
+    FakeProvider.raise_mode = "api"
 
     input_path = tmp_path / "in3.jpg"
     output_dir = tmp_path / "out3"
@@ -253,27 +263,26 @@ def test_pipeline_client_api_error_returns_error_status_with_context(tmp_path: P
         output_path=str(output_path),
         prompt="cause api error",
         strength=0.8,
-        guidance=7.5,
+        guidance_scale=7.5,
         seed=42
     )
-    assert result["status"] == "极速赛车开奖结果历史记录error"
+    assert result["status"] == "error"
     # Error type should reflect the originating exception class name
     assert result["error_type"] == "ApiError"
     assert "Pipeline failed" in result["message"]
     # Verify the error message includes context from the ApiError
     assert "provider=" in result["message"]
-    assert "model=" in result["message"]
     assert "strength=0.8" in result["message"]
-    assert "guidance=7.5" in result["message"]
+    assert "guidance_scale=7.5" in result["message"]
     assert "seed=42" in result["message"]
 
 
-def test_pipeline_client_network_error_returns_error_status_with_context(tmp_path: Path, pipeline_with_stubs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pipeline_provider_network_error_returns_error_status_with_context(tmp_path: Path, pipeline_with_stubs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     pipeline_mod = pipeline_with_stubs
     from lib.config import Settings
 
-    # Configure stub client to raise network error
-    FakeHFClient.raise_mode = "network"
+    # Configure stub provider to raise network error
+    FakeProvider.raise_mode = "network"
 
     input_path = tmp_path / "in4.jpg"
     output_dir = tmp_path / "out4"
@@ -293,7 +302,6 @@ def test_pipeline_client_network_error_returns_error_status_with_context(tmp_pat
     assert "Pipeline failed" in result["message"]
     # Verify the error message includes context from the NetworkError
     assert "provider=" in result["message"]
-    assert "model=" in result["message"]
 
 
 def test_pipeline_image_io_load_error_returns_error_status(tmp_path: Path, pipeline_with_stubs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,7 +338,7 @@ def test_pipeline_validation_error_returns_error_status(tmp_path: Path, pipeline
     output_path = tmp_path / "output.jpg"
 
     pipe = pipeline_mod.ImageEditPipeline(Settings(HF_API_TOKEN="unit-test-token"))
-    result极速赛车开奖结果历史记录 = pipe.edit_image(
+    result = pipe.edit_image(
         input_path=str(input_path),
         output_path=str(output_path),
         prompt="test prompt",

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, Optional, List, Union
 from datetime import datetime
@@ -389,20 +390,29 @@ def save_error_artifact(error: BaseError, filename: str) -> None:
         logger.error(f"Failed to save error artifact to {filename}: {e}")
 
 
-def format_error_for_cli(error: BaseError, verbose: bool = False) -> str:
+def format_error_for_cli(error: Exception, verbose: bool = False) -> str:
     """
     Format error for CLI display with appropriate detail level.
     
     Args:
-        error: The error to format
+        error: The error to format (can be BaseError or a standard Exception)
         verbose: Whether to include detailed context
     
     Returns:
         str: Formatted error message for CLI output
     """
+    # Handle structured application errors with rich context
+    if isinstance(error, BaseError):
+        if verbose:
+            # Full detailed output with serialized context
+            return f"{type(error).__name__}: {error}\n\nFull context:\n{error.to_json()}"
+        else:
+            # Concise user-friendly output
+            return f"{type(error).__name__}: {error.message} | {error.user_guidance}"
+    
+    # Fallback for regular Exceptions without custom attributes
     if verbose:
-        # Full detailed output
-        return f"{type(error).__name__}: {error}\n\nFull context:\n{error.to_json()}"
+        tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        return f"{type(error).__name__}: {error}\n\nTraceback:\n{tb}"
     else:
-        # Concise user-friendly output
-        return f"{type(error).__name__}: {error.message} | {error.user_guidance}"
+        return f"{type(error).__name__}: {str(error)}"

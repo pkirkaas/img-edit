@@ -45,8 +45,47 @@ import typer
 # Typer application instance (no shell completion for compactness here)
 app = typer.Typer(
     add_completion=False,
-    help="AI Image Edit CLI using huggingface_hub.InferenceClient (Qwen/Qwen-Image-Edit). Requires HF_TOKEN (preferred) or HF_API_TOKEN.",
+    help=(
+        "AI Image Edit CLI. Subcommands: 'edit' (image editing) and 'providers' (list providers). "
+        "Default provider: replicate; Hugging Face is fully supported. "
+        "Run 'pdm run img-edit edit --help' for all options and examples."
+    ),
 )
+
+@app.callback()
+def _root_callback() -> None:
+    """
+    Image editing CLI with a provider-agnostic architecture.
+
+    Command structure:
+      - edit: Edit an image using AI (default provider: replicate)
+      - providers: List available providers
+
+    Quick start:
+      $ pdm run img-edit edit --input ./examples/assets/input.jpg --prompt "Replace the sky with a sunset" --output ./out/edited.jpg
+
+    Provider selection:
+      - Replicate (default): no flag needed
+      - Hugging Face via provider: add --provider huggingface
+      - Hugging Face via explicit endpoint: add --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
+
+    Examples:
+      # Default provider (Replicate)
+      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Replace the sky with a sunset" -o ./out/edited.jpg
+
+      # Hugging Face provider
+      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Cartoonize the photo" -o ./out/hf.jpg --provider huggingface
+
+      # Explicit Hugging Face endpoint (overrides provider/model)
+      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Make it black and white" -o ./out/mono.jpg --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
+
+    Notes:
+      - The default provider is Replicate, but Hugging Face remains fully supported.
+      - Use 'pdm run img-edit providers' to list available providers.
+      - Always invoke the image editing functionality via the subcommand: 'img-edit edit [OPTIONS]'.
+    """
+    # Callback used only to render richer top-level --help text
+    return None
 
 
 def _encode_file_b64(path: Path) -> str:
@@ -76,7 +115,7 @@ def _encode_file_b64(path: Path) -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
-@app.command("edit")
+@app.command("edit", help="Edit an image using AI (default provider: replicate). See examples with '--help'.")
 def edit(
     input_path: Path = typer.Option(
         ...,
@@ -151,13 +190,20 @@ def edit(
     endpoint: Optional[str] = typer.Option(
         None,
         "--endpoint",
-        help="Explicit Hugging Face inference endpoint URL (overrides provider/model for this run)",
+        help=(
+            "Explicit inference endpoint URL for Hugging Face; overrides provider/model for this run. "
+            "Use this for backward compatibility or to target a specific HF endpoint."
+        ),
         metavar="URL",
     ),
     provider: Optional[str] = typer.Option(
-        "fal-ai",
+        None,
         "--provider",
-        help='Inference provider to use (default: "fal-ai"). Ignored if --endpoint is provided.',
+        help=(
+            "Inference provider to use (e.g., 'huggingface', 'replicate'). "
+            "Defaults to settings.DEFAULT_PROVIDER (default: 'replicate' unless overridden in .env). "
+            "Ignored if --endpoint is provided. Use 'img-edit providers' to list available providers."
+        ),
         metavar="NAME",
     ),
     model: Optional[str] = typer.Option(
@@ -179,27 +225,45 @@ def edit(
     ),
 ) -> None:
     """
-    Edit an image using the Qwen/Qwen-Image-Edit model via the Hugging Face Serverless API.
+    Edit an image with AI.
 
-    Parameters:
-        input_path: Path to the input image to be edited
-        prompt: Text prompt describing the edit to apply
-        output_path: Destination path for the edited image
-        mask: Optional path to a mask image; if provided, it is Base64-encoded and sent as 'mask'
-        seed: Optional seed for deterministic generation
-        strength: Optional strength for editing; falls back to configuration default if omitted
-        guidance: Optional guidance scale; falls back to configuration default if omitted
-        timeout: Optional request timeout override; if provided, overrides configuration for this invocation
-        endpoint: Optional Hugging Face endpoint override; if provided, overrides configuration for this invocation
+    Overview:
+      - Default provider: Replicate (fast and cost-efficient)
+      - Hugging Face is fully supported and can be selected with '--provider huggingface'
+        or by setting an explicit Hugging Face '--endpoint' (which overrides provider/model)
+
+    Required options:
+      - --input / -i FILE   Path to the input image
+      - --prompt / -p TEXT  Text instructions describing the edit
+      - --output / -o FILE  Path to save the edited image
+
+    Common options:
+      - --provider NAME     'replicate' (default) or 'huggingface' (ignored if --endpoint is provided)
+      - --endpoint URL      Explicit Hugging Face endpoint (overrides provider/model)
+      - --strength FLOAT    Edit strength 0.0–1.0 (default from config: 0.8)
+      - --guidance FLOAT    Guidance scale >= 0.0 (default from config: 7.5)
+      - --seed INT          Deterministic seed
+      - --timeout SECONDS   Request timeout override in seconds
+
+    Examples:
+      1) Default provider (Replicate)
+         pdm run img-edit edit -i ./examples/assets/input.jpg -p "Replace the sky with a sunset" -o ./out/edited.jpg
+
+      2) Hugging Face by provider
+         pdm run img-edit edit -i ./examples/assets/input.jpg -p "Cartoonize the photo" -o ./out/hf.jpg --provider huggingface
+
+      3) Hugging Face with explicit endpoint (overrides provider/model)
+         pdm run img-edit edit -i ./examples/assets/input.jpg -p "Make it black and white" -o ./out/mono.jpg \
+           --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
 
     Behavior:
-        - Ensures the output directory exists before invoking the pipeline
-        - Constructs a Settings object honoring optional endpoint/timeout overrides
-        - Invokes the pipeline's edit operation with provided parameters
-        - Emits user-friendly messages and returns appropriate process exit codes
+      - Ensures the output directory exists before invoking the pipeline
+      - Constructs a Settings object honoring optional endpoint/timeout overrides
+      - Invokes the pipeline's edit operation with provided parameters
+      - Emits user-friendly messages and returns appropriate process exit codes
 
     Raises:
-        typer.Exit: With non-zero status if an error occurs
+      - typer.Exit: With non-zero status if an error occurs
     """
     # Defer library imports to avoid config evaluation during --help
     try:
@@ -233,8 +297,6 @@ def edit(
     if endpoint is not None:
         # Endpoint wins over provider/model if provided
         settings_overrides["HF_INFERENCE_ENDPOINT"] = endpoint
-    if provider is not None:
-        settings_overrides["IMG_EDIT_PROVIDER"] = provider
     if model is not None:
         settings_overrides["IMG_EDIT_MODEL"] = model
 
@@ -248,6 +310,61 @@ def edit(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # Determine and validate the effective provider selection
+    # If endpoint is provided, prefer 'huggingface' provider since endpoint applies there
+    try:
+        from lib.providers import get_provider_class, list_providers, get_registry  # type: ignore
+    except Exception:
+        get_provider_class = None  # type: ignore
+        list_providers = None  # type: ignore
+        get_registry = None  # type: ignore
+
+    effective_provider = None
+    if endpoint is not None:
+        effective_provider = "huggingface"
+    elif provider is not None:
+        effective_provider = provider
+
+    selected_provider = effective_provider or getattr(settings, "DEFAULT_PROVIDER", None)
+
+    # Validate provider name against provider registry if possible
+    if selected_provider and get_provider_class is not None:
+        try:
+            get_provider_class(selected_provider)  # may raise KeyError if not registered
+        except KeyError as e:
+            available = []
+            try:
+                if list_providers is not None:
+                    mapping = list_providers()
+                    available = sorted(mapping.keys()) if mapping else []
+            except Exception:
+                try:
+                    if get_registry is not None:
+                        registry = get_registry()
+                        available = sorted(list(registry))
+                except Exception:
+                    available = []
+            typer.secho(
+                f"Invalid provider '{selected_provider}'. Available providers: {', '.join(available) if available else 'none'}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        except Exception:
+            # If provider registry cannot be consulted, continue; pipeline will surface errors
+            pass
+
+    # Apply the effective provider to settings so the pipeline uses it
+    if selected_provider:
+        try:
+            settings.DEFAULT_PROVIDER = selected_provider  # type: ignore[attr-defined]
+            # Keep legacy field in sync for downstream compatibility
+            if hasattr(settings, "IMG_EDIT_PROVIDER"):
+                settings.IMG_EDIT_PROVIDER = selected_provider  # type: ignore[attr-defined]
+        except Exception:
+            # Continue even if assignment fails; pipeline may still resolve a provider
+            pass
 
     # Prepare extra payload args
     extra_inputs = {}
@@ -331,6 +448,9 @@ def edit(
                 
             raise typer.Exit(code=1)
 
+    except typer.Exit:
+        # Allow Typer to handle explicit exit codes without additional formatting
+        raise
     except Exception as e:
         # Format error based on verbosity - use our error formatting function
         from lib.errors import format_error_for_cli
@@ -348,6 +468,57 @@ def edit(
         
         raise typer.Exit(code=1)
 
+
+@app.command("providers")
+def providers_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Output provider list as JSON")
+) -> None:
+    """
+    List available providers from the registry.
+
+    Attempts to include descriptions when possible. Use --json for machine-readable output.
+    """
+    try:
+        from lib.providers import list_providers, get_registry  # type: ignore
+        from lib.config import Settings  # type: ignore
+    except Exception as e:
+        typer.secho(f"Failed to import provider registry: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    default_name = None
+    try:
+        default_name = Settings().DEFAULT_PROVIDER
+    except Exception:
+        default_name = None
+
+    data = {}
+    try:
+        data = list_providers()  # type: ignore
+    except Exception:
+        try:
+            reg = get_registry()  # type: ignore
+            names = list(reg)
+            data = {name: "" for name in names}
+        except Exception:
+            data = {}
+
+    if json_output:
+        out = {"default": default_name, "providers": data}
+        typer.echo(json.dumps(out, indent=2))
+        return
+
+    if default_name:
+        typer.echo(f"Default provider: {default_name}")
+    if not data:
+        typer.echo("No providers are currently registered.")
+    else:
+        typer.echo("Available providers:")
+        for name, desc in data.items():
+            mark = " (default)" if default_name and name == default_name else ""
+            if desc:
+                typer.echo(f"  - {name}{mark}: {desc}")
+            else:
+                typer.echo(f"  - {name}{mark}")
 
 def main() -> None:
     """

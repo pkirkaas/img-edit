@@ -35,15 +35,17 @@ import os
 import time
 import logging
 from typing import Dict, List, Optional, Tuple, Union
+from PIL import Image
 
 from lib.config import Settings
-from lib.hf_client import HFImageEditClient
-from lib.image_io import ImageIO
+from lib.image_io import ImageIO, load_image as load_pil_image
 from lib.logging_utils import get_logger, log_timing, TimingContext
 from lib.errors import (
     PipelineError, ImageValidationError, NetworkError, ProviderApiError,
     IoError, ValidationError, create_error_context, save_error_artifact
 )
+from lib.providers import get_provider_class
+from lib.providers.base import ImageEditProvider
 
 # Module-level logger
 logger = get_logger(__name__)
@@ -77,16 +79,17 @@ class ImageEditPipeline:
         """
         self.settings = settings
         self.image_io = ImageIO()
-        # Initialize the thin HF client wrapper around huggingface_hub.InferenceClient
-        self.hf_client = HFImageEditClient(
-            provider=self.settings.IMG_EDIT_PROVIDER,
-            model=self.settings.IMG_EDIT_MODEL,
-            endpoint=self.settings.HF_INFERENCE_ENDPOINT,
-            token=self.settings.get_token(),
-            timeout=self.settings.IMG_EDIT_TIMEOUT_SECONDS,
-        )
+        # Initialize the provider from registry
+        provider_name = self.settings.DEFAULT_PROVIDER
+        try:
+            provider_class = get_provider_class(provider_name)
+            self.provider = provider_class()
+        except KeyError as e:
+            raise PipelineError(f"Provider '{provider_name}' not found in registry") from e
+        except Exception as e:
+            raise PipelineError(f"Failed to initialize provider '{provider_name}': {e}") from e
         
-        logger.info("ImageEditPipeline initialized successfully")
+        logger.info(f"ImageEditPipeline initialized with provider: {provider_name}")
     
     @log_timing()
     def edit_image(
@@ -142,11 +145,11 @@ class ImageEditPipeline:
             self._validate_inputs(input_path, output_path, prompt)
             
             # Load and validate input image
-            image_bytes, image_info = self._load_and_validate_image(input_path)
+            image, image_info = self._load_and_validate_image(input_path)
             
             # Execute the API request
             edited_image = self._execute_api_request(
-                image_bytes, prompt, guidance_scale, strength, seed, **kwargs
+                image, prompt, guidance_scale, strength, seed, **kwargs
             )
             
             # Save the result
@@ -174,7 +177,7 @@ class ImageEditPipeline:
                 # Create rich context for the pipeline error
                 error_context = create_error_context(
                     operation="edit_image",
-                    provider=self.settings.IMG_EDIT_PROVIDER,
+                    provider=self.provider.name,
                     model=self.settings.IMG_EDIT_MODEL,
                     endpoint=self.settings.HF_INFERENCE_ENDPOINT,
                     elapsed_ms=execution_time * 1000,
@@ -242,7 +245,7 @@ class ImageEditPipeline:
         
         logger.debug(f"Input validation passed for: {input_path}")
     
-    def _load_and_validate_image(self, input_path: str) -> Tuple[bytes, Dict[str, any]]:
+    def _load_and_validate_image(self, input_path: str) -> Tuple[Image.Image, Dict[str, any]]:
         """
         Load and validate the input image.
         
@@ -250,22 +253,26 @@ class ImageEditPipeline:
             input_path: Path to input image
             
         Returns:
-            Tuple of (image_bytes, image_info)
+            Tuple of (image, image_info) where image is PIL Image and image_info contains format and dimensions
             
         Raises:
             ImageValidationError: If image validation fails
         """
         try:
             with TimingContext("image_loading", level=logging.DEBUG):
-                image_bytes, image_info = self.image_io.load_image(input_path)
+                image = load_pil_image(input_path)
+                image_info = {
+                    "format": image.format if image.format else "UNKNOWN",
+                    "dimensions": image.size
+                }
             
             logger.info(f"Loaded image: {input_path} ({image_info['format']}, {image_info['dimensions']})")
-            return image_bytes, image_info
+            return image, image_info
             
         except Exception as e:
             error_context = create_error_context(
                 operation="image_loading",
-                provider=self.settings.IMG_EDIT_PROVIDER,
+                provider=self.provider.name,
                 model=self.settings.IMG_EDIT_MODEL,
                 endpoint=self.settings.HF_INFERENCE_ENDPOINT,
                 root_cause=e
@@ -278,7 +285,7 @@ class ImageEditPipeline:
     
     def _execute_api_request(
         self,
-        image_bytes: bytes,
+        image: Image.Image,
         prompt: str,
         guidance_scale: Optional[float],
         strength: Optional[float],
@@ -286,36 +293,36 @@ class ImageEditPipeline:
         **kwargs
     ) -> "Image.Image":
         """
-        Execute the Hugging Face API request.
+        Execute the image edit request using the configured provider.
         
         Args:
-            image_bytes: Raw image bytes
-            prompt: Text prompt
+            image: PIL Image object to edit
+            prompt: Text prompt describing the desired edit
             guidance_scale: Guidance scale parameter
-            strength: Strength parameter
-            seed: Optional seed
-            **kwargs: Additional parameters
+            strength: Strength parameter for editing
+            seed: Optional seed for deterministic results
+            **kwargs: Additional parameters for the provider
             
         Returns:
-            PIL.Image.Image: Edited image from API
+            PIL.Image.Image: Edited image from provider
             
         Raises:
-            HFAPIError: If API returns an error
-            HFNetworkError: If network issues occur
-            PipelineTimeoutError: If operation times out
+            ProviderApiError: If provider API returns an error
+            NetworkError: If network issues occur
+            PipelineError: If operation fails unexpectedly
         """
         try:
             with TimingContext("api_request", level=logging.INFO):
-                edited_image = self.hf_client.edit_image(
-                    input_image=image_bytes,
-                    prompt=prompt,
-                    guidance=guidance_scale,
-                    strength=strength,
+                edited_image = self.provider.edit_image(
+                    image=image,
+                    instructions=prompt,
+                    strength=strength if strength is not None else self.settings.IMG_EDIT_DEFAULT_STRENGTH,
+                    guidance_scale=guidance_scale if guidance_scale is not None else self.settings.IMG_EDIT_DEFAULT_GUIDANCE,
                     seed=seed,
                     **kwargs,
                 )
             
-            logger.info(f"API request completed successfully")
+            logger.info(f"API request completed successfully with provider: {self.provider.name}")
             return edited_image
             
         except (ProviderApiError, NetworkError) as e:
@@ -326,7 +333,7 @@ class ImageEditPipeline:
             # Wrap unexpected errors in PipelineError with context
             error_context = create_error_context(
                 operation="api_request",
-                provider=self.settings.IMG_EDIT_PROVIDER,
+                provider=self.provider.name,
                 model=self.settings.IMG_EDIT_MODEL,
                 endpoint=self.settings.HF_INFERENCE_ENDPOINT,
                 root_cause=e
@@ -335,7 +342,7 @@ class ImageEditPipeline:
             raise PipelineError(
                 f"API request failed: {e}",
                 context=error_context,
-                user_guidance="This may indicate an unexpected issue with the API client or network. Check logs for details."
+                user_guidance="This may indicate an unexpected issue with the API provider or network. Check logs for details."
             ) from e
     
     def _save_result(self, edited_image: "Image.Image", output_path: str) -> Dict[str, any]:
@@ -362,7 +369,7 @@ class ImageEditPipeline:
         except Exception as e:
             error_context = create_error_context(
                 operation="image_saving",
-                provider=self.settings.IMG_EDIT_PROVIDER,
+                provider=self.provider.name,
                 model=self.settings.IMG_EDIT_MODEL,
                 endpoint=self.settings.HF_INFERENCE_ENDPOINT,
                 root_cause=e
@@ -410,7 +417,8 @@ class ImageEditPipeline:
     
     def close(self) -> None:
         """Clean up resources."""
-        self.hf_client.close()
+        if hasattr(self, 'provider') and self.provider is not None:
+            self.provider.close()
         logger.info("Pipeline resources cleaned up")
     
     def __enter__(self):
