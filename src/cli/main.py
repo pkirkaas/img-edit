@@ -398,6 +398,44 @@ def edit(
             typer.echo(f"Image: {result.get('image_format')} {result.get('image_dimensions')}")
             typer.echo(f"Size: {result.get('file_size')} bytes")
             typer.echo(f"Time: {result.get('execution_time'):.2f}s")
+
+            # Summarize provider/model and parameters used
+            eff_provider = selected_provider or getattr(settings, "DEFAULT_PROVIDER", None) or "unknown"
+            provider_note = "(default)" if (provider is None and endpoint is None) else ""
+            # Determine model used
+            if endpoint is not None or eff_provider == "huggingface":
+                eff_model = getattr(settings, "IMG_EDIT_MODEL", "Qwen/Qwen-Image-Edit")
+                model_note = "(default)" if (model == "Qwen/Qwen-Image-Edit") else "(overridden)"
+            elif eff_provider == "replicate":
+                eff_model = "qwen/qwen-image-edit"
+                model_note = "(provider default)"
+            else:
+                eff_model = getattr(settings, "IMG_EDIT_MODEL", "Qwen/Qwen-Image-Edit")
+                model_note = ""
+            # Effective parameter values
+            used_strength = strength if strength is not None else getattr(settings, "IMG_EDIT_DEFAULT_STRENGTH", 0.8)
+            used_guidance = guidance if guidance is not None else getattr(settings, "IMG_EDIT_DEFAULT_GUIDANCE", 7.5)
+            used_seed = seed if seed is not None else None  # None => random
+            used_timeout = getattr(settings, "IMG_EDIT_TIMEOUT_SECONDS", 120)
+            mask_used = mask is not None
+            # Default markers
+            strength_note = "(default)" if strength is None else "(user)"
+            guidance_note = "(default)" if guidance is None else "(user)"
+            timeout_note = "(default)" if timeout is None else "(overridden)"
+            seed_display = str(used_seed) if used_seed is not None else "random (unset)"
+
+            typer.echo("Run summary:")
+            typer.echo(f"  Provider: {eff_provider} {provider_note}")
+            if endpoint:
+                typer.echo(f"  Endpoint: {endpoint}")
+            typer.echo(f"  Model: {eff_model} {model_note}")
+            typer.echo("  Parameters:")
+            typer.echo(f"    prompt: {prompt!r}")
+            typer.echo(f"    mask: {'yes' if mask_used else 'no'}")
+            typer.echo(f"    strength: {used_strength} {strength_note}")
+            typer.echo(f"    guidance: {used_guidance} {guidance_note}")
+            typer.echo(f"    seed: {seed_display}")
+            typer.echo(f"    timeout: {used_timeout}s {timeout_note}")
             
             # Save success artifact in debug mode
             if debug:
@@ -410,10 +448,30 @@ def edit(
                 else:
                     settings_dict = vars(settings)
                 
+                # Also persist a run summary for diagnostics
+                run_summary = {
+                    "provider": eff_provider,
+                    "provider_default": (provider is None and endpoint is None),
+                    "model": eff_model,
+                    "endpoint": endpoint,
+                    "parameters": {
+                        "prompt": prompt,
+                        "mask_provided": mask_used,
+                        "strength": used_strength,
+                        "strength_default": strength is None,
+                        "guidance": used_guidance,
+                        "guidance_default": guidance is None,
+                        "seed": used_seed,
+                        "seed_random": used_seed is None,
+                        "timeout_seconds": used_timeout,
+                        "timeout_default": timeout is None,
+                    },
+                }
                 success_artifact = {
                     "status": "success",
                     "result": result,
                     "settings": settings_dict,
+                    "run_summary": run_summary,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 }
                 os.makedirs("tmp", exist_ok=True)
@@ -426,6 +484,41 @@ def edit(
             # Error result from pipeline
             error_message = format_error_for_cli(Exception(message), verbose or debug)
             typer.secho(f"Edit failed: {error_message}", fg=typer.colors.RED, err=True)
+
+            # Print run summary to aid diagnostics
+            eff_provider = selected_provider or getattr(settings, "DEFAULT_PROVIDER", None) or "unknown"
+            provider_note = "(default)" if (provider is None and endpoint is None) else ""
+            if endpoint is not None or eff_provider == "huggingface":
+                eff_model = getattr(settings, "IMG_EDIT_MODEL", "Qwen/Qwen-Image-Edit")
+                model_note = "(default)" if (model == "Qwen/Qwen-Image-Edit") else "(overridden)"
+            elif eff_provider == "replicate":
+                eff_model = "qwen/qwen-image-edit"
+                model_note = "(provider default)"
+            else:
+                eff_model = getattr(settings, "IMG_EDIT_MODEL", "Qwen/Qwen-Image-Edit")
+                model_note = ""
+            used_strength = strength if strength is not None else getattr(settings, "IMG_EDIT_DEFAULT_STRENGTH", 0.8)
+            used_guidance = guidance if guidance is not None else getattr(settings, "IMG_EDIT_DEFAULT_GUIDANCE", 7.5)
+            used_seed = seed if seed is not None else None
+            used_timeout = getattr(settings, "IMG_EDIT_TIMEOUT_SECONDS", 120)
+            mask_used = mask is not None
+            strength_note = "(default)" if strength is None else "(user)"
+            guidance_note = "(default)" if guidance is None else "(user)"
+            timeout_note = "(default)" if timeout is None else "(overridden)"
+            seed_display = str(used_seed) if used_seed is not None else "random (unset)"
+
+            typer.echo("Run summary:", err=True)
+            typer.echo(f"  Provider: {eff_provider} {provider_note}", err=True)
+            if endpoint:
+                typer.echo(f"  Endpoint: {endpoint}", err=True)
+            typer.echo(f"  Model: {eff_model} {model_note}", err=True)
+            typer.echo("  Parameters:", err=True)
+            typer.echo(f"    prompt: {prompt!r}", err=True)
+            typer.echo(f"    mask: {'yes' if mask_used else 'no'}", err=True)
+            typer.echo(f"    strength: {used_strength} {strength_note}", err=True)
+            typer.echo(f"    guidance: {used_guidance} {guidance_note}", err=True)
+            typer.echo(f"    seed: {seed_display}", err=True)
+            typer.echo(f"    timeout: {used_timeout}s {timeout_note}", err=True)
             
             # Save error artifact in debug mode or if verbose
             if debug or verbose:
@@ -438,8 +531,28 @@ def edit(
                 else:
                     settings_dict = vars(settings)
                 
+                # Also persist run summary for diagnostics
+                run_summary = {
+                    "provider": eff_provider,
+                    "provider_default": (provider is None and endpoint is None),
+                    "model": eff_model,
+                    "endpoint": endpoint,
+                    "parameters": {
+                        "prompt": prompt,
+                        "mask_provided": mask_used,
+                        "strength": used_strength,
+                        "strength_default": strength is None,
+                        "guidance": used_guidance,
+                        "guidance_default": guidance is None,
+                        "seed": used_seed,
+                        "seed_random": used_seed is None,
+                        "timeout_seconds": used_timeout,
+                        "timeout_default": timeout is None,
+                    },
+                }
                 error_artifact = result.copy()
                 error_artifact["settings"] = settings_dict
+                error_artifact["run_summary"] = run_summary
                 error_artifact["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 os.makedirs("tmp", exist_ok=True)
                 with open("tmp/last_error.json", "w") as f:
