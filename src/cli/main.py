@@ -75,6 +75,12 @@ def _root_callback(
         help="Text prompt describing the requested edit",
         metavar="TEXT",
     ),
+    negative_prompt: Optional[str] = typer.Option(
+        None,
+        "--negative-prompt",
+        help="Text prompt describing what to avoid in the edited image",
+        metavar="TEXT",
+    ),
     output_path: Optional[Path] = typer.Option(
         None,
         "--output",
@@ -264,6 +270,7 @@ def _root_callback(
     edit(
         input_path=input_path,
         prompt=prompt,
+        negative_prompt=negative_prompt,
         output_path=output_path,
         mask=mask,
         seed=seed,
@@ -324,6 +331,12 @@ def edit(
         "--prompt",
         "-p",
         help="Text prompt describing the requested edit",
+        metavar="TEXT",
+    ),
+    negative_prompt: Optional[str] = typer.Option(
+        None,
+        "--negative-prompt",
+        help="Text prompt describing what to avoid in the edited image",
         metavar="TEXT",
     ),
     output_path: Path = typer.Option(
@@ -433,16 +446,20 @@ def edit(
       - --strength FLOAT    Edit strength 0.0–1.0 (default from config: 0.8)
       - --guidance FLOAT    Guidance scale >= 0.0 (default from config: 7.5)
       - --seed INT          Deterministic seed
+      - --negative-prompt TEXT  Text describing what to avoid in the edited image
       - --timeout SECONDS   Request timeout override in seconds
 
     Examples:
       1) Default provider (Replicate)
          pdm run img-edit edit -i ./examples/assets/input.jpg -p "Replace the sky with a sunset" -o ./out/edited.jpg
 
-      2) Hugging Face by provider
+      2) With negative prompt to avoid specific elements
+         pdm run img-edit edit -i input.jpg -p "Make it sunny" --negative-prompt "clouds, rain, gloomy" -o sunny.jpg
+
+      3) Hugging Face by provider
          pdm run img-edit edit -i ./examples/assets/input.jpg -p "Cartoonize the photo" -o ./out/hf.jpg --provider huggingface
 
-      3) Hugging Face with explicit endpoint (overrides provider/model)
+      4) Hugging Face with explicit endpoint (overrides provider/model)
          pdm run img-edit edit -i ./examples/assets/input.jpg -p "Make it black and white" -o ./out/mono.jpg \
            --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
 
@@ -562,6 +579,9 @@ def edit(
         if mask is not None:
             # Read and encode mask as base64 string so the HF client can include it in JSON payload
             extra_inputs["mask"] = _encode_file_b64(mask)
+        if negative_prompt is not None:
+            # Add negative prompt to extra inputs
+            extra_inputs["negative_prompt"] = negative_prompt
     except Exception as e:
         typer.secho(f"Failed to read/encode mask '{mask}': {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -608,6 +628,7 @@ def edit(
             used_seed = seed if seed is not None else None  # None => random
             used_timeout = getattr(settings, "IMG_EDIT_TIMEOUT_SECONDS", 120)
             mask_used = mask is not None
+            negative_prompt_used = negative_prompt is not None
             # Default markers
             strength_note = "(default)" if strength is None else "(user)"
             guidance_note = "(default)" if guidance is None else "(user)"
@@ -622,6 +643,7 @@ def edit(
             typer.echo("  Parameters:")
             typer.echo(f"    prompt: {prompt!r}")
             typer.echo(f"    mask: {'yes' if mask_used else 'no'}")
+            typer.echo(f"    negative_prompt: {'yes' if negative_prompt_used else 'no'}")
             typer.echo(f"    strength: {used_strength} {strength_note}")
             typer.echo(f"    guidance: {used_guidance} {guidance_note}")
             typer.echo(f"    seed: {seed_display}")
@@ -646,6 +668,7 @@ def edit(
                     "endpoint": endpoint,
                     "parameters": {
                         "prompt": prompt,
+                        "negative_prompt_provided": negative_prompt_used,
                         "mask_provided": mask_used,
                         "strength": used_strength,
                         "strength_default": strength is None,
@@ -692,6 +715,7 @@ def edit(
             used_seed = seed if seed is not None else None
             used_timeout = getattr(settings, "IMG_EDIT_TIMEOUT_SECONDS", 120)
             mask_used = mask is not None
+            negative_prompt_used = negative_prompt is not None
             strength_note = "(default)" if strength is None else "(user)"
             guidance_note = "(default)" if guidance is None else "(user)"
             timeout_note = "(default)" if timeout is None else "(overridden)"
@@ -705,6 +729,7 @@ def edit(
             typer.echo("  Parameters:", err=True)
             typer.echo(f"    prompt: {prompt!r}", err=True)
             typer.echo(f"    mask: {'yes' if mask_used else 'no'}", err=True)
+            typer.echo(f"    negative_prompt: {'yes' if negative_prompt_used else 'no'}", err=True)
             typer.echo(f"    strength: {used_strength} {strength_note}", err=True)
             typer.echo(f"    guidance: {used_guidance} {guidance_note}", err=True)
             typer.echo(f"    seed: {seed_display}", err=True)
@@ -729,6 +754,7 @@ def edit(
                     "endpoint": endpoint,
                     "parameters": {
                         "prompt": prompt,
+                        "negative_prompt_provided": negative_prompt_used,
                         "mask_provided": mask_used,
                         "strength": used_strength,
                         "strength_default": strength is None,
