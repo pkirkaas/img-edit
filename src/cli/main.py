@@ -3,10 +3,9 @@ Typer-based CLI entry point for the Image Edit application.
 
 Syntax validated with ast.parse.
 
-This CLI exposes an "edit" command to send an image and prompt to the Hugging Face
-Serverless Inference API for Qwen/Qwen-Image-Edit. It integrates with the core library
-pipeline and configuration modules, and is intended to be executed via the PDM script
-"img-edit" defined in [pyproject.toml](pyproject.toml).
+This CLI exposes a single-command interface that edits an image using AI.
+It integrates with the core library pipeline and configuration modules, and
+is intended to be executed via the PDM script "img-edit" defined in [pyproject.toml](pyproject.toml).
 
 Execution:
 - Use PDM (see [docs/setup.md](docs/setup.md))
@@ -22,7 +21,7 @@ Integration points (core library):
 - [src/lib/errors.py](src/lib/errors.py)
 
 Notes:
-- Imports of lib.* are deferred into command handlers to avoid raising configuration
+- Imports of lib.* are deferred into handlers to avoid raising configuration
   errors when running `--help` on systems without required environment variables set.
 - Errors are reported with clear messages, while structured logs go to the logger.
 - Supports --verbose and --debug flags for detailed error reporting.
@@ -46,46 +45,237 @@ import typer
 app = typer.Typer(
     add_completion=False,
     help=(
-        "AI Image Edit CLI. Subcommands: 'edit' (image editing) and 'providers' (list providers). "
+        "AI Image Edit CLI. Single-command interface: run with options to edit images. "
+        "Use '--providers' to list available providers. "
         "Default provider: replicate; Hugging Face is fully supported. "
-        "Run 'pdm run img-edit edit --help' for all options and examples."
+        "Run 'pdm run img-edit --help' for detailed options and examples."
     ),
 )
 
-@app.callback()
-def _root_callback() -> None:
+
+@app.callback(invoke_without_command=True)
+def _root_callback(
+    # Edit options (all optional here so --providers can be used alone; validated below)
+    input_path: Optional[Path] = typer.Option(
+        None,
+        "--input",
+        "-i",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Path to input image file",
+        metavar="FILE",
+    ),
+    prompt: Optional[str] = typer.Option(
+        None,
+        "--prompt",
+        "-p",
+        help="Text prompt describing the requested edit",
+        metavar="TEXT",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        file_okay=True,
+        dir_okay=False,
+        writable=True,
+        resolve_path=True,
+        help="Path to save the edited image",
+        metavar="FILE",
+    ),
+    mask: Optional[Path] = typer.Option(
+        None,
+        "--mask",
+        "-m",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Optional path to a mask image file. Mask will be sent as base64 in the request.",
+        metavar="FILE",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="Optional seed for deterministic results. Same seed with same inputs yields repeatable outputs. Omit for random seed.",
+        metavar="INT",
+    ),
+    strength: Optional[float] = typer.Option(
+        None,
+        "--strength",
+        help="Edit strength in [0.0, 1.0]. Low (0.0–0.3)=subtle edits; Mid (0.4–0.7)=balanced; High (0.8–1.0)=strong changes, may introduce artifacts. Defaults to config if omitted.",
+        min=0.0,
+        max=1.0,
+        metavar="FLOAT",
+    ),
+    guidance: Optional[float] = typer.Option(
+        None,
+        "--guidance",
+        help="Classifier-free guidance scale (>= 0.0). Typical 1–20. Lower values favor creativity/diversity; higher values enforce the prompt more strictly (risk oversaturation). Defaults to config if omitted.",
+        min=0.0,
+        metavar="FLOAT",
+    ),
+    timeout: Optional[int] = typer.Option(
+        None,
+        "--timeout",
+        help="HTTP timeout in seconds (>=1). Lower fails faster on slow networks; higher avoids timeouts but waits longer. Overrides config for this run.",
+        min=1,
+        metavar="SECONDS",
+    ),
+    endpoint: Optional[str] = typer.Option(
+        None,
+        "--endpoint",
+        help=(
+            "Explicit inference endpoint URL for Hugging Face; overrides provider/model for this run. "
+            "Use this for backward compatibility or to target a specific HF endpoint."
+        ),
+        metavar="URL",
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help=(
+            "Inference provider to use (e.g., 'huggingface', 'replicate'). "
+            "Defaults to settings.DEFAULT_PROVIDER (default: 'replicate' unless overridden in .env). "
+            "Ignored if --endpoint is provided. Use '--providers' to list available providers."
+        ),
+        metavar="NAME",
+    ),
+    model: Optional[str] = typer.Option(
+        "Qwen/Qwen-Image-Edit",
+        "--model",
+        help='Model repo id to use (default: "Qwen/Qwen-Image-Edit"). Ignored if --endpoint is provided.',
+        metavar="REPO",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose output with detailed error information",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug mode with full error context and artifact saving",
+    ),
+    # Providers listing option (replaces former 'providers' subcommand)
+    providers: bool = typer.Option(
+        False,
+        "--providers",
+        help="List available providers and exit",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="With --providers, output provider list as JSON",
+    ),
+) -> None:
     """
     Image editing CLI with a provider-agnostic architecture.
 
-    Command structure:
-      - edit: Edit an image using AI (default provider: replicate)
-      - providers: List available providers
-
-    Quick start:
-      $ pdm run img-edit edit --input ./examples/assets/input.jpg --prompt "Replace the sky with a sunset" --output ./out/edited.jpg
+    Single-command usage:
+      $ pdm run img-edit --input ./examples/assets/input.jpg \\
+                         --prompt "Replace the sky with a sunset" \\
+                         --output ./out/edited.jpg [other options]
 
     Provider selection:
       - Replicate (default): no flag needed
       - Hugging Face via provider: add --provider huggingface
       - Hugging Face via explicit endpoint: add --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
 
-    Examples:
-      # Default provider (Replicate)
-      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Replace the sky with a sunset" -o ./out/edited.jpg
+    Helpful ranges and effects:
+      - --strength FLOAT [0.0–1.0]
+          Low (0.0–0.3): subtle edits, preserves the original more
+          Mid (0.4–0.7): balanced changes
+          High (0.8–1.0): strong changes, higher chance of artifacts
+      - --guidance FLOAT (>= 0.0, typical 1–20)
+          Lower: more creative/diverse but weaker prompt adherence
+          Higher: more literal prompt adherence, can reduce variety and oversaturate
+      - --timeout SECONDS (>= 1)
+          Lower: fail fast on slow responses
+          Higher: avoid timeouts at the cost of waiting longer
 
-      # Hugging Face provider
-      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Cartoonize the photo" -o ./out/hf.jpg --provider huggingface
-
-      # Explicit Hugging Face endpoint (overrides provider/model)
-      pdm run img-edit edit -i ./examples/assets/input.jpg -p "Make it black and white" -o ./out/mono.jpg --endpoint https://api-inference.huggingface.co/models/Qwen/Qwen-Image-Edit
+    Provider discovery:
+      - Use '--providers' to list available providers (add '--json' for machine-readable output)
 
     Notes:
-      - The default provider is Replicate, but Hugging Face remains fully supported.
-      - Use 'pdm run img-edit providers' to list available providers.
-      - Always invoke the image editing functionality via the subcommand: 'img-edit edit [OPTIONS]'.
+      - The default provider is Replicate, but Hugging Face is fully supported.
+      - Always invoke the image editing functionality via the single command: 'img-edit [OPTIONS]'.
     """
-    # Callback used only to render richer top-level --help text
-    return None
+    # If provider listing requested, print it and exit early
+    if providers:
+        try:
+            from lib.providers import list_providers, get_registry  # type: ignore
+            from lib.config import Settings  # type: ignore
+        except Exception as e:
+            typer.secho(f"Failed to import provider registry: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+
+        default_name = None
+        try:
+            default_name = Settings().DEFAULT_PROVIDER
+        except Exception:
+            default_name = None
+
+        data = {}
+        try:
+            data = list_providers()  # type: ignore
+        except Exception:
+            try:
+                reg = get_registry()  # type: ignore
+                names = list(reg)
+                data = {name: "" for name in names}
+            except Exception:
+                data = {}
+
+        if json_output:
+            out = {"default": default_name, "providers": data}
+            typer.echo(json.dumps(out, indent=2))
+            raise typer.Exit(code=0)
+
+        if default_name:
+            typer.echo(f"Default provider: {default_name}")
+        if not data:
+            typer.echo("No providers are currently registered.")
+        else:
+            typer.echo("Available providers:")
+            for name, desc in data.items():
+                mark = " (default)" if default_name and name == default_name else ""
+                if desc:
+                    typer.echo(f"  - {name}{mark}: {desc}")
+                else:
+                    typer.echo(f"  - {name}{mark}")
+        raise typer.Exit(code=0)
+
+    # Otherwise, perform the edit. Validate requireds here since options are optional on callback.
+    if input_path is None or prompt is None or output_path is None:
+        typer.secho(
+            "Missing required options: --input, --prompt, --output\nRun 'pdm run img-edit --help' for usage.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Delegate to the edit command implementation for the actual work
+    edit(
+        input_path=input_path,
+        prompt=prompt,
+        output_path=output_path,
+        mask=mask,
+        seed=seed,
+        strength=strength,
+        guidance=guidance,
+        timeout=timeout,
+        endpoint=endpoint,
+        provider=provider,
+        model=model,
+        verbose=verbose,
+        debug=debug,
+    )
 
 
 def _encode_file_b64(path: Path) -> str:
@@ -162,13 +352,13 @@ def edit(
     seed: Optional[int] = typer.Option(
         None,
         "--seed",
-        help="Optional seed for deterministic results",
+        help="Optional seed for deterministic results. Same seed with same inputs yields repeatable outputs. Omit for random seed.",
         metavar="INT",
     ),
     strength: Optional[float] = typer.Option(
         None,
         "--strength",
-        help="Strength parameter for editing (0.0 - 1.0). Defaults to config if omitted.",
+        help="Edit strength in [0.0, 1.0]. Low (0.0–0.3)=subtle edits; Mid (0.4–0.7)=balanced; High (0.8–1.0)=strong changes, may introduce artifacts. Defaults to config if omitted.",
         min=0.0,
         max=1.0,
         metavar="FLOAT",
@@ -176,14 +366,14 @@ def edit(
     guidance: Optional[float] = typer.Option(
         None,
         "--guidance",
-        help="Guidance scale (creativity vs adherence). Defaults to config if omitted.",
+        help="Classifier-free guidance scale (>= 0.0). Typical 1–20. Lower values favor creativity/diversity; higher values enforce the prompt more strictly (risk oversaturation). Defaults to config if omitted.",
         min=0.0,
         metavar="FLOAT",
     ),
     timeout: Optional[int] = typer.Option(
         None,
         "--timeout",
-        help="HTTP timeout in seconds (overrides config for this run)",
+        help="HTTP timeout in seconds (>=1). Lower fails faster on slow networks; higher avoids timeouts but waits longer. Overrides config for this run.",
         min=1,
         metavar="SECONDS",
     ),
@@ -202,7 +392,7 @@ def edit(
         help=(
             "Inference provider to use (e.g., 'huggingface', 'replicate'). "
             "Defaults to settings.DEFAULT_PROVIDER (default: 'replicate' unless overridden in .env). "
-            "Ignored if --endpoint is provided. Use 'img-edit providers' to list available providers."
+            "Ignored if --endpoint is provided. Use '--providers' to list available providers."
         ),
         metavar="NAME",
     ),
@@ -582,56 +772,10 @@ def edit(
         raise typer.Exit(code=1)
 
 
-@app.command("providers")
-def providers_cmd(
-    json_output: bool = typer.Option(False, "--json", help="Output provider list as JSON")
-) -> None:
-    """
-    List available providers from the registry.
+# Note: Previous 'providers' subcommand has been removed.
+# Use the global '--providers' option instead:
+#   pdm run img-edit --providers [--json]
 
-    Attempts to include descriptions when possible. Use --json for machine-readable output.
-    """
-    try:
-        from lib.providers import list_providers, get_registry  # type: ignore
-        from lib.config import Settings  # type: ignore
-    except Exception as e:
-        typer.secho(f"Failed to import provider registry: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-
-    default_name = None
-    try:
-        default_name = Settings().DEFAULT_PROVIDER
-    except Exception:
-        default_name = None
-
-    data = {}
-    try:
-        data = list_providers()  # type: ignore
-    except Exception:
-        try:
-            reg = get_registry()  # type: ignore
-            names = list(reg)
-            data = {name: "" for name in names}
-        except Exception:
-            data = {}
-
-    if json_output:
-        out = {"default": default_name, "providers": data}
-        typer.echo(json.dumps(out, indent=2))
-        return
-
-    if default_name:
-        typer.echo(f"Default provider: {default_name}")
-    if not data:
-        typer.echo("No providers are currently registered.")
-    else:
-        typer.echo("Available providers:")
-        for name, desc in data.items():
-            mark = " (default)" if default_name and name == default_name else ""
-            if desc:
-                typer.echo(f"  - {name}{mark}: {desc}")
-            else:
-                typer.echo(f"  - {name}{mark}")
 
 def main() -> None:
     """

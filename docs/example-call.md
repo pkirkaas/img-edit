@@ -60,14 +60,14 @@ pdm run img-edit \
 
 ## Provider Discovery
 
-You can list all available providers using the providers subcommand:
+Use the global --providers option:
 
 ```bash
 # List available providers
-pdm run img-edit providers
+pdm run img-edit --providers
 
 # List providers in JSON format
-pdm run img-edit providers --json
+pdm run img-edit --providers --json
 ```
 
 ## Python Code Examples
